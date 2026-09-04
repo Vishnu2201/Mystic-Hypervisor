@@ -1,89 +1,110 @@
-# Mystic Hypervisor — Networking, IP Ownership & NAT Topology Model
+# Mystic Hypervisor — Network Exposure Configuration & Port Allocation Model
 
-**Status:** Milestone 3D — Public IP Ownership, NAT Awareness & Port Forwarding Model  
+**Status:** Milestone 4 — Workload Networking & Port Allocation Engine  
 **Reference Document:** `PROJECT_CONSTITUTION.md`
 
-## 1. Overview & IP Ownership Semantics
+## 1. Architectural Principles & Network Model
 
-Mystic Hypervisor strictly distinguishes between IPv4 addresses assigned to local server interfaces and addresses observed externally through Internet-facing lookups. An external lookup result (e.g. `curl https://api.ipify.org`) is evidence of an **Upstream Gateway Public IP**, but does NOT prove local interface IP ownership.
+Mystic Hypervisor enforces a strict architectural separation between three network domains:
 
-| Concept | Field | Example | Semantics |
+1. **Detected Network Facts (Read-Only Telemetry):** Empirical facts observed on the host system (e.g. interface IPs, routes, upstream NAT detection).
+2. **Administrator Configuration (User Intent):** Explicit exposure choices made by administrators (e.g. exposure mode, upstream gateway settings, port forwarding rules, port allocation requests).
+3. **Actual / Applied Network State (System Operations):** Applied host interface bindings, local firewall rules, and active proxy routes.
+
+```text
+┌──────────────────────────────────────┐     ┌──────────────────────────────────────┐
+│       DETECTED NETWORK FACTS         │     │     ADMINISTRATOR CONFIGURATION      │
+│  - Interface IPv4 (10.0.0.25)        │     │  - ExposureMode (NAT_FORWARDED)      │
+│  - Host Public IP (NOT_ASSIGNED)     │     │  - Target Scope (HOST / WORKLOAD)    │
+│  - Upstream Public IP (51.162.178.x) │ ──► │  - Gateway ID (gw-router-01)         │
+│  - NAT Status (LIKELY)               │     │  - Gateway Public IP (51.162.178.x)  │
+│  - Bridges (docker0, incusbr0)       │     │  - ForwardingRules ([]Rule)          │
+└──────────────────────────────────────┘     └──────────────────────────────────────┘
+                                                                │
+                                                                ▼
+                                             ┌──────────────────────────────────────┐
+                                             │      ACTUAL / APPLIED STATE          │
+                                             │  - Active Listener Bindings          │
+                                             │  - Validated Interface Endpoints     │
+                                             └──────────────────────────────────────┘
+```
+
+## 2. First-Class Exposure Modes
+
+Mystic Hypervisor supports four explicit exposure modes plus a default unconfigured state:
+
+| Exposure Mode | Enum Value | Description | Typical Use Case |
 | :--- | :--- | :--- | :--- |
-| **Private IP** | `DETECTED_PRIVATE_IP` | `10.0.0.250` | RFC1918 IPv4 address assigned to local interface (`ens18`) |
-| **Host Public IP** | `DETECTED_HOST_PUBLIC_IP` | `NOT_ASSIGNED` | Globally routable IPv4 address *actually assigned to local interface* |
-| **Upstream Public IP** | `DETECTED_UPSTREAM_PUBLIC_IP` | `51.162.178.199` | Public IPv4 observed externally via Internet-facing lookup |
-| **IP Assignment Status** | `PUBLIC_IP_ASSIGNMENT_STATUS` | `NOT_ASSIGNED` | `DIRECT` (assigned to local IF) \| `NOT_ASSIGNED` \| `UNKNOWN` |
-| **NAT Status** | `NAT_STATUS` | `LIKELY` | `NOT_DETECTED` (when direct public) \| `LIKELY` (behind NAT) \| `UNKNOWN` |
+| **Default / Unconfigured** | `UNCONFIGURED` | No explicit exposure topology selected; system relies strictly on read-only facts. | Fresh installation / dry-run. |
+| **Private Only** | `PRIVATE_ONLY` | Host & workloads reachable exclusively via internal network or VPN tunnel. | Internal clusters, WireGuard / Tailscale VPNs. |
+| **NAT Forwarded** | `NAT_FORWARDED` | Private host behind an upstream NAT router/firewall forwarding specific ports. | Cloud VPS (Hetzner/OVH/AWS), home lab routers. |
+| **Direct Public** | `DIRECT_PUBLIC` | Globally routable public IPv4 address assigned directly to host interface. | Bare-metal servers with public IPv4 block. |
+| **External Gateway** | `EXTERNAL_GATEWAY` | Traffic routed through a dedicated external proxy or gateway server. | Cloudflare Tunnels, edge HAProxy, secondary VPS gateway. |
 
-## 2. Network Exposure Topologies
+## 3. Upstream Gateway & Forwarding Rule Models
 
-### A. NAT-Forwarded Topology (Private Host Behind Upstream Gateway)
-```text
-Internet
-   │
-   ▼
-Upstream Public Gateway
-51.162.178.199
-   │
-   │ NAT / Port Forwarding
-   │
-10.0.0.250 (ens18)
-Mystic Host
-   ├── Incus
-   ├── Docker
-   └── Mystic Workloads
+### A. Gateway Types (`GatewayType`) & Management Capability
+- **Types**: `UPSTREAM_PROVIDER`, `EXTERNAL_ROUTER`, `EXTERNAL_VPS`, `MYSTIC_HOST`, `DEDICATED_GATEWAY`, `CLOUD_GATEWAY`, `UNKNOWN`.
+- **Management Capabilities**:
+  - `MANAGED_BY_MYSTIC`: Mystic has credentials/agent capability to apply rules directly to the gateway.
+  - `EXTERNALLY_MANAGED`: Upstream router/proxy is managed externally by the user or cloud provider. Mystic records intent but does NOT claim the gateway has been altered.
+  - `UNKNOWN`: Unclassified management state.
+
+### B. Forwarding Rule Struct (`ForwardingRule`)
+```go
+type ForwardingRule struct {
+	ID                string        `json:"id"`
+	GatewayID         string        `json:"gateway_id,omitempty"`
+	PublicIP          string        `json:"public_ip"`
+	PublicPort        int           `json:"public_port"`
+	Protocol          Protocol      `json:"protocol"` // TCP, UDP, TCP_UDP
+	DestinationHostID string        `json:"destination_host_id"`
+	DestinationIP     string        `json:"destination_ip"`
+	DestinationPort   int           `json:"destination_port"`
+	WorkloadID        string        `json:"workload_id,omitempty"`
+	State             ExposureState `json:"state"` // UNCONFIGURED, CONFIGURED, REQUESTED, APPLIED, VERIFIED, FAILED
+	Owner             ResourceOwner `json:"owner"`
+	Description       string        `json:"description,omitempty"`
+}
 ```
 
-### B. Direct-Public Topology (Public IP Assigned Directly to Host)
-```text
-Internet
-   │
-   ▼
-Public IP Assigned Directly (e.g. 51.162.178.199 on ens18)
-   │
-Mystic Host
-```
+## 4. Port Allocation Modes & Validation Engine (Milestone 4)
 
-### C. Private-Only Topology
-```text
-Private Subnet (10.0.0.0/8 or VPN)
-   │
-   ▼
-Private Mystic Host (10.0.0.250) (No public IP / no inbound NAT)
-```
+Mystic Hypervisor provides an Allocation Engine (`backend/internal/networking/allocator.go`) supporting three administrator-selected allocation modes:
 
-## 3. Why External IP Lookups Do Not Prove Local IP Ownership
+1. **`SINGLE` (Single Port Mapping)**: Maps a single external port (e.g. `20022`) to a single internal port (e.g. `22`).
+2. **`RANGE` (Consecutive Port Range)**: Maps a range of external ports (e.g. `20022–20100`) 1:1 to an equal-sized range of internal ports (e.g. `20022–20100`). Also supports automatic consecutive range allocation from a configured `AllocationPool` (returns `ALLOCATION_POOL_UNCONFIGURED` if unconfigured).
+3. **`EXPLICIT` (Explicit Mappings List)**: Maps custom individual external ports/IPs to specific workload internal ports.
 
-- An external HTTP lookup reflects the WAN IP of the edge router or firewall performing Source NAT for outbound traffic.
-- Storing an externally observed WAN IP as `DETECTED_HOST_PUBLIC_IP` causes severe network misconfigurations:
-  1. Local services attempting to bind to the public IP will fail with `EADDRNOTAVAIL` (`cannot assign requested address`).
-  2. Mystic cannot configure firewall rules on an interface for an IP it does not own.
-  3. Mystic cannot claim an upstream public port is available without controlling the upstream router/gateway.
+### Conflict Classification Hierarchy
+- `AVAILABLE`: Port is free for allocation.
+- `ALREADY_ALLOCATED_BY_MYSTIC`: Claimed by another Mystic forwarding rule.
+- `LISTENING_ON_HOST`: Currently bound by a process on the host (`ss -tulpn`).
+- `RESERVED_MANAGEMENT`: Reserved for SSH management (port 22) or control plane API (8443).
+- `OWNED_BY_EXTERNAL_SUBSYSTEM`: Owned by Docker, Pterodactyl, Incus, etc.
+- `ALLOCATION_POOL_UNCONFIGURED`: Automatic pool allocation requested but no pool is configured.
 
-## 4. Port Forwarding Conceptual Data Model
-
-Mystic Hypervisor prepares the data model for future port forwarding assistance without automatically altering upstream routers or local iptables rules:
+## 5. Forwarding Rule Lifecycle
 
 ```text
-Forwarding Rule Concept:
-  Upstream Gateway IP:  51.162.178.199
-  External Port:        22022
-        │
-        ▼ (NAT Forwarding)
-  Internal Host IP:     10.0.0.250
-  Internal Port:        22
-  Protocol:             TCP
+UNCONFIGURED ──► CONFIGURED ──► REQUESTED ──► APPLIED ──► VERIFIED
+                                  │             │
+                                  ▼             ▼
+                                FAILED        FAILED
 ```
+- **`CONFIGURED`**: Initial state when administrator creates rule in Mystic.
+- **`REQUESTED`**: When a gateway integration agent receives rule configuration request.
+- **`APPLIED`**: Confirmed by gateway.
+- **`VERIFIED`**: Confirmed by connectivity check.
+- **`FAILED`**: Gateway rejected or connectivity verification failed.
 
-- **Non-Identical Ports**: External ports (e.g., `22022`) do not need to match internal service ports (`22`).
-- **External Gateway Boundary**: Upstream NAT configuration requires manual gateway port forwarding or explicit provider gateway integration. Mystic does NOT manipulate upstream routers or assume port availability.
+## 6. Network Safety Engine & Management Protection
 
-## 5. Management Network Safety & Lockout Prevention
+The Network Safety Engine (`installer/modules/netsafety.sh`) guarantees:
+- Primary management interface (`ens18`) is protected from deletion or binding lockouts.
+- Default route gateway (`10.0.0.1`) remains untouched.
+- Active SSH service path (Port 22) is preserved.
+- Pre-existing bridges (`docker0`, `incusbr0`, `pterodactyl0`) are preserved.
+- **Zero** host network, route, or firewall mutations during dry-run or inspection.
 
-The Network Safety Engine (`installer/modules/netsafety.sh`) preserves:
-- Primary management interface (`ens18`).
-- Default route gateway (`10.0.0.1`).
-- Active SSH service connection path (Port 22).
-- Existing external bridges (`docker0`, `pterodactyl0`, `incusbr0`).
 
-The NAT/Public IP detection model performs **zero** route additions, interface tear-downs, port bindings, or firewall mutations.

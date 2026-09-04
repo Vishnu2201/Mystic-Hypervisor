@@ -1,4 +1,5 @@
 import React from 'react'
+import { NetworkExposureConfig } from '../components/NetworkExposureConfig'
 
 export const Images: React.FC = () => (
   <div>
@@ -20,10 +21,8 @@ export const Storage: React.FC = () => (
 
 export const Networks: React.FC = () => (
   <div>
-    <h1 style={{ marginTop: 0, fontSize: '1.5rem', color: '#38bdf8' }}>Network Topology</h1>
-    <div style={{ backgroundColor: '#1e293b', padding: '20px', borderRadius: '8px', border: '1px solid #334155', color: '#94a3b8' }}>
-      Virtual networks and bridge configuration interface initialized.
-    </div>
+    <h1 style={{ marginTop: 0, fontSize: '1.5rem', color: '#38bdf8', marginBottom: '20px' }}>Network Topology & Exposure Model</h1>
+    <NetworkExposureConfig />
   </div>
 )
 

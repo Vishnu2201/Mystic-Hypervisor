@@ -1,6 +1,6 @@
 # Mystic Hypervisor — Safe Installer Architecture & Deep Inventory Reference
 
-**Status:** Milestone 3C — Deep Linux Host & Existing Infrastructure Inventory  
+**Status:** Milestone 4 — Workload Networking & Port Allocation Engine  
 **Reference Document:** `PROJECT_CONSTITUTION.md`
 
 ## 1. Overview
@@ -23,18 +23,32 @@ To ensure Mystic Hypervisor never assumes sole ownership of pre-existing server 
 | **`MYSTIC`** | Mystic Hypervisor control plane & bridges | `mysticd`, `mysticbr0` | Managed by Mystic |
 | **`UNKNOWN`** | Unclassified pre-existing resources | External custom bridges | Preserved as external |
 
-## 3. Milestone 3C Deep Read-Only Inspection Matrix
+## 3. Network Exposure & JSON Plan Schema (Milestone 3E)
 
-When executed via `./install.sh --dry-run` or `./install.sh --plan --json`, the detection engine inspects:
+When executed via `./install.sh --plan --json`, the installer generates a structured JSON plan separating `"detected"` network facts from `"configuration"` settings:
 
-1. **Host Deep Telemetry**: Hostname, non-secret Machine ID status hash, OS release, Kernel, Architecture, Boot mode (UEFI/BIOS), Uptime, Systemd status, cgroup version (v1/v2), Virtualization environment (`systemd-detect-virt`), CPU topology (sockets/cores), CPU model, RAM, Swap, Load average, Root filesystem, Inode usage, and Block devices (`lsblk`).
-2. **KVM Capability Matrix**:
-   - `/dev/kvm` status: `ACCESSIBLE`, `PRESENT_INACCESSIBLE`, `NOT_PRESENT`, `UNAVAILABLE`
-   - KVM Unavailable Reason: Explains missing `/dev/kvm` device nodes (e.g. cloud VPS instances without nested virtualization enabled) or udev permission errors.
-   - CPU Virtualization flags (`vmx`/`svm`) & Nested virtualization status (`AVAILABLE`/`NOT_AVAILABLE`).
-3. **Incus Deep Inspection (Read-Only)**: Queries `incus version`, daemon availability, storage pools & drivers, networks & types, projects, profiles, and instance counts without creating client configs or executing mutations.
-4. **Docker Deep Inspection (Read-Only)**: Queries `docker --version`, daemon availability, running/total container count, network names, and volume counts without stopping/starting containers.
-5. **Pterodactyl / Existing Services**: Detects `wings` daemon, Pterodactyl storage paths, and `pterodactyl0` bridge.
-6. **Port & Service Inventory**: Read-only `ss -tulpn` scan identifying active listening ports (SSH 22, Incus API, Docker daemon, Pterodactyl Wings).
-7. **Coexistence-Aware Provider Recommendation Engine**: Dynamically evaluates `Resource Capacity + Hardware Virt + Existing Providers + Existing Networks + Existing Storage + Ownership + Coexistence Risk`.
-   - *Example*: A server with 10 CPUs, 64 GB RAM, Incus installed, but `/dev/kvm` acceleration missing, dynamically recommends **Incus** with detailed multi-point rationale.
+```json
+{
+  "installer_version": "0.5.0-milestone3e",
+  "networking": {
+    "detected": {
+      "management_interface": "ens18",
+      "private_ip": "10.0.0.25",
+      "host_public_ip": "NOT_ASSIGNED",
+      "upstream_public_ip": "51.162.178.199",
+      "public_ip_assignment_status": "NOT_ASSIGNED",
+      "nat_status": "LIKELY",
+      "topology": "NAT_LIKELY"
+    },
+    "configuration": {
+      "exposure_mode": "UNCONFIGURED",
+      "gateway_id": "",
+      "gateway_public_ip": "",
+      "forwarding_rules": []
+    }
+  }
+}
+```
+
+This ensures zero ambiguity between empirical host state and administrator exposure configuration.
+

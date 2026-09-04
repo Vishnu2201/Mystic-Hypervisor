@@ -100,12 +100,15 @@ render_dry_run_plan() {
     echo "Network Exposure Model"
     echo "----------------------"
     echo "Supported Modes:"
-    echo "  - PRIVATE_ONLY  (Host reachable via private network / VPN only)"
-    echo "  - NAT_FORWARDED (Private host behind upstream gateway / port forwarding)"
-    echo "  - DIRECT_PUBLIC (Host with direct public IP on interface)"
+    echo "  - PRIVATE_ONLY      (Host reachable via private network / VPN only)"
+    echo "  - NAT_FORWARDED     (Private host behind upstream gateway / port forwarding)"
+    echo "  - DIRECT_PUBLIC     (Host with direct public IP on interface)"
+    echo "  - EXTERNAL_GATEWAY  (Traffic routed through dedicated external gateway / proxy)"
     echo ""
     echo "Current Detected State: ${DETECTED_NETWORK_TOPOLOGY} (NAT Status: ${NAT_STATUS})"
     echo "Configured Exposure Mode: ${CONFIGURED_EXPOSURE_MODE}"
+    echo "Gateway ID:               ${CONFIGURED_GATEWAY_ID:-NONE}"
+    echo "Gateway Public IP:        ${CONFIGURED_GATEWAY_PUBLIC_IP:-NONE}"
     echo "Note: Observed network facts are distinct from configured exposure modes."
     echo "No network, routing, firewall, or port forwarding changes will be made."
     echo ""
@@ -169,7 +172,7 @@ render_dry_run_plan() {
 render_json_plan() {
     cat <<EOF
 {
-  "installer_version": "0.4.0-milestone3d",
+  "installer_version": "0.5.0-milestone3e",
   "host": {
     "hostname": "$DETECTED_HOSTNAME",
     "machine_id_status": "$MACHINE_ID_STATUS",
@@ -229,6 +232,28 @@ render_json_plan() {
     "podman_status": "$PODMAN_STATUS"
   },
   "networking": {
+    "detected": {
+      "management_interface": "$DETECTED_MGMT_IF",
+      "private_ip": "$DETECTED_PRIVATE_IP",
+      "host_public_ip": "$DETECTED_HOST_PUBLIC_IP",
+      "upstream_public_ip": "$DETECTED_UPSTREAM_PUBLIC_IP",
+      "public_ip_assignment_status": "$PUBLIC_IP_ASSIGNMENT_STATUS",
+      "nat_status": "$NAT_STATUS",
+      "topology": "$DETECTED_NETWORK_TOPOLOGY",
+      "default_route": "$DETECTED_DEFAULT_ROUTE",
+      "bridges": "$DETECTED_BRIDGES_STRING",
+      "dns": "$DETECTED_DNS",
+      "firewall": "$DETECTED_FIREWALL",
+      "ssh_status": "$SSH_STATUS",
+      "ssh_port": "$SSH_PORT",
+      "listen_ports": "$DETECTED_LISTEN_PORTS"
+    },
+    "configuration": {
+      "exposure_mode": "$CONFIGURED_EXPOSURE_MODE",
+      "gateway_id": "$CONFIGURED_GATEWAY_ID",
+      "gateway_public_ip": "$CONFIGURED_GATEWAY_PUBLIC_IP",
+      "forwarding_rules": []
+    },
     "management_interface": "$DETECTED_MGMT_IF",
     "private_ip": "$DETECTED_PRIVATE_IP",
     "host_public_ip": "$DETECTED_HOST_PUBLIC_IP",

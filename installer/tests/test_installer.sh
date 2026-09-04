@@ -15,7 +15,7 @@ assert_contains() {
     local expected="$2"
     local test_name="$3"
 
-    if echo "$output" | grep -q "$expected"; then
+    if echo "$output" | grep -F -q "$expected"; then
         echo "  [PASS] $test_name"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
@@ -60,15 +60,23 @@ assert_contains "$OUT_DRY" "Network Exposure Model" "Dry-run renders Network Exp
 assert_contains "$OUT_DRY" "PRIVATE_ONLY" "Dry-run documents PRIVATE_ONLY exposure mode"
 assert_contains "$OUT_DRY" "NAT_FORWARDED" "Dry-run documents NAT_FORWARDED exposure mode"
 assert_contains "$OUT_DRY" "DIRECT_PUBLIC" "Dry-run documents DIRECT_PUBLIC exposure mode"
+assert_contains "$OUT_DRY" "EXTERNAL_GATEWAY" "Dry-run documents EXTERNAL_GATEWAY exposure mode"
+assert_contains "$OUT_DRY" "Gateway ID:" "Dry-run renders Gateway ID field"
+assert_contains "$OUT_DRY" "Gateway Public IP:" "Dry-run renders Gateway Public IP field"
 
 # Test 5: Plan Mode JSON Output Structure & Unambiguous IP Fields
 OUT_JSON=$(bash "$INSTALLER_DIR/install.sh" --plan --json 2>&1 || true)
 assert_contains "$OUT_JSON" '"dry_run": true' "Plan mode generates valid JSON structure"
+assert_contains "$OUT_JSON" '"installer_version": "0.5.0-milestone3e"' "JSON plan reports 0.5.0-milestone3e version"
+assert_contains "$OUT_JSON" '"detected": {' "JSON plan includes detected facts object"
+assert_contains "$OUT_JSON" '"configuration": {' "JSON plan includes configuration settings object"
 assert_contains "$OUT_JSON" '"host_public_ip":' "JSON plan includes host_public_ip field"
 assert_contains "$OUT_JSON" '"upstream_public_ip":' "JSON plan includes upstream_public_ip field"
 assert_contains "$OUT_JSON" '"public_ip_assignment_status":' "JSON plan includes public_ip_assignment_status field"
 assert_contains "$OUT_JSON" '"nat_status":' "JSON plan includes nat_status field"
 assert_contains "$OUT_JSON" '"configured_exposure_mode":' "JSON plan includes configured_exposure_mode field"
+assert_contains "$OUT_JSON" '"gateway_id":' "JSON plan includes gateway_id field"
+assert_contains "$OUT_JSON" '"forwarding_rules": []' "JSON plan includes forwarding_rules list"
 
 # Test 6: Apply Guard on Dev Host
 OUT_APPLY=$(bash "$INSTALLER_DIR/install.sh" --apply --yes 2>&1 || true)

@@ -264,6 +264,8 @@ detect_system() {
         fi
 
         CONFIGURED_EXPOSURE_MODE="UNCONFIGURED"
+        CONFIGURED_GATEWAY_ID=""
+        CONFIGURED_GATEWAY_PUBLIC_IP=""
 
         # Read-only Bridge Inventory & Ownership Mapping
         RAW_BRIDGES=$(ip link show type bridge 2>/dev/null | awk -F': ' '{print $2}' | awk '{print $1}' || echo "")
@@ -294,6 +296,8 @@ detect_system() {
         NAT_STATUS="UNKNOWN"
         DETECTED_NETWORK_TOPOLOGY="UNKNOWN"
         CONFIGURED_EXPOSURE_MODE="UNCONFIGURED"
+        CONFIGURED_GATEWAY_ID=""
+        CONFIGURED_GATEWAY_PUBLIC_IP=""
         DETECTED_BRIDGES_STRING="NONE"
     fi
 
