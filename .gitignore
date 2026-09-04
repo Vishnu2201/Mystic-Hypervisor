@@ -1,0 +1,42 @@
+# Binaries & build outputs
+/bin/
+/dist/
+*.exe
+*.exe.manifest
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go
+/backend/bin/
+/cli/bin/
+vendor/
+
+# Node / Frontend
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Environment & Config
+.env
+.env.local
+*.local
+
+# IDEs & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS / Temp
+tmp/
+scratch/
+/var/lib/mystic/
