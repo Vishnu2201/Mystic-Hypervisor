@@ -1,18 +1,20 @@
 # Mystic Hypervisor — Security Policy & Model
 
-**Status:** Milestone 1 — Engineering Foundation  
+**Status:** Milestone 2 — Safe Installer Foundation  
 **Reference Document:** `PROJECT_CONSTITUTION.md`
 
-## 1. Security Architecture
+## 1. Security Architecture & Principles
 
-Mystic Hypervisor is designed with a **Secure by Default** security posture:
+Mystic Hypervisor is designed with a **Secure by Default** posture across control plane, API, and installer:
 
-- **TLS / HTTPS**: All web and API traffic must use TLS 1.3/1.2. Self-signed certificates are generated automatically on installation if Let's Encrypt or custom certificates are not configured.
-- **Authentication**: JWT / Session-token based authentication with password hashing using Argon2id / bcrypt.
-- **Role-Based Access Control (RBAC)**: Fine-grained permissions controlling host, instance, network, storage, user, and audit log access.
-- **Audit Logging**: Mandatory structured logging for all privileged or state-changing operations.
-- **Secret Redaction**: Automatic stripping and masking of secrets (passwords, tokens, private keys, session cookies) in application logs.
-- **No Arbitrary Command Execution**: Mystic API never exposes arbitrary host shell execution endpoints.
+- **HTTPS / TLS**: All web and API traffic must use TLS 1.3/1.2. Self-signed certificates are generated automatically during installation if custom certificates are not specified.
+- **Installer POSIX Shell Hygiene**:
+  - No `eval` statements.
+  - All variables properly quoted.
+  - No blind `sudo` execution or unvalidated user inputs.
+  - Transaction logs automatically redact sensitive key-value patterns (`password=`, `token=`, `secret=`).
+- **No Lockout Protection**: The installer Network Safety Engine verifies active SSH sessions, SSH listening ports, and management routes before applying network changes to prevent administrator lockout.
+- **Secret Redaction**: Automatic stripping and masking of secrets (passwords, tokens, private keys, session cookies) in application logs and installer transaction state files.
 
 ## 2. Default Roles & Permissions
 
@@ -20,20 +22,8 @@ Mystic Hypervisor is designed with a **Secure by Default** security posture:
 - `Operator`: Instance lifecycle management (start, stop, restart, snapshot, console), image viewing, and monitoring.
 - `Viewer`: Read-only access to instance status, host metrics, and public network configuration.
 
-### Example Permission Identifiers
-- `host:read`, `host:manage`
-- `instance:read`, `instance:create`, `instance:start`, `instance:stop`, `instance:delete`, `instance:console`
-- `network:read`, `network:manage`
-- `storage:read`, `storage:manage`
-- `user:read`, `user:manage`
-- `audit:read`
-
 ## 3. Secret Protection Policy
 
-1. **No Credentials in Code**: Source code must never contain hardcoded secrets, private keys, API tokens, or default passwords.
-2. **Log Redaction**: `backend/internal/logging` wraps all structured log writers with a secret redactor regex filter replacing sensitive patterns with `[REDACTED]`.
+1. **No Credentials in Source**: Code and repository assets must never contain hardcoded secrets, private keys, API tokens, or default passwords.
+2. **Log & Transaction Redaction**: `backend/internal/logging` and `installer/modules/transaction.sh` sanitize all log writers and step metadata.
 3. **Environment & Filesystem**: Sensitive configuration files stored under `/etc/mystic/` or `/var/lib/mystic/` must have file permissions `0600` or `0700` owned by `mystic:mystic`.
-
-## 4. Reporting Vulnerabilities
-
-If you identify a security vulnerability in Mystic Hypervisor, please report it privately to security@mysticpanel.dev or file a confidential report. Do not create public issues for security vulnerabilities.
