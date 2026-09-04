@@ -1,61 +1,40 @@
-# Mystic Hypervisor — Safe Installer Architecture & Reference
+# Mystic Hypervisor — Safe Installer Architecture & Deep Inventory Reference
 
-**Status:** Milestone 2 — Safe Installer Foundation  
+**Status:** Milestone 3C — Deep Linux Host & Existing Infrastructure Inventory  
 **Reference Document:** `PROJECT_CONSTITUTION.md`
 
 ## 1. Overview
 
-The Mystic Hypervisor installer is a production-grade POSIX shell pipeline engineered around **safety, idempotency, preflight validation, explicit user consent, transaction tracking, rollback, and failure recovery**.
+The Mystic Hypervisor installer is a production-grade POSIX shell pipeline engineered around **safety, deep infrastructure inventory, resource ownership attribution (`HOST_RESOURCE_OWNER`), coexistence with pre-existing host workloads, idempotency, preflight validation, explicit user consent, transaction tracking, rollback, and failure recovery**.
 
-It is designed strictly for target Linux servers (Ubuntu, Debian, RHEL, Rocky Linux, AlmaLinux) while maintaining explicit environment awareness when executed under development host environments (Windows / Git Bash / macOS).
+It is designed to perform **100% read-only** deep system inspection across Linux target servers (Ubuntu, Debian, RHEL, Rocky Linux, AlmaLinux).
 
-## 2. Installer Modes & Invocation
+## 2. Resource Ownership Attribution (`HOST_RESOURCE_OWNER`)
 
-Default invocation (`./install.sh`) displays safe usage instructions and requires an explicit mode flag to prevent accidental host modifications.
+To ensure Mystic Hypervisor never assumes sole ownership of pre-existing server infrastructure, every detected bridge, storage pool, and hypervisor engine is tagged with an explicit ownership model:
 
-| Mode | Command | Description | Safety Behavior |
+| Owner Enum | Description | Example Target | Mystic Action |
 | :--- | :--- | :--- | :--- |
-| **Default** | `./install.sh` | Explains installer capabilities and modes | Read-only / Explanatory |
-| **Dry-Run** | `./install.sh --dry-run` | Performs system detection & renders execution plan | Read-only (Exit code 0) |
-| **Plan** | `./install.sh --plan [--json]` | Generates human- or machine-readable plan | Read-only |
-| **Apply** | `./install.sh --apply [--yes]` | Applies installation transaction to host server | Requires explicit user confirmation; blocked on non-Linux dev hosts |
-| **Rollback** | `./install.sh --rollback` | Undoes recorded transaction changes | Safe restoration of Mystic-altered state |
-| **Doctor** | `./install.sh --doctor` | Standalone system health diagnostic | Read-only diagnostic |
-| **Uninstall** | `./install.sh --uninstall` | Safely removes Mystic control plane | Preserves user VMs, containers, & storage |
-| **Version** | `./install.sh --version` | Outputs installer version information | Read-only |
-| **Help** | `./install.sh --help` | Displays usage options | Read-only |
+| **`SYSTEM`** | Host operating system & management route | `ens18`, `/proc`, `/sys` | Protected & preserved |
+| **`INCUS`** | Incus hypervisor, networks, storage, projects | `incusbr0`, storage pools | Preserved & integrated |
+| **`DOCKER`** | Docker daemon, networks, containers | `docker0`, `/var/lib/docker` | Preserved & untouched |
+| **`PTERODACTYL`** | Pterodactyl Wings / Panel game servers | `pterodactyl0`, `/srv/daemon-data` | Preserved & untouched |
+| **`LIBVIRT`** | libvirt QEMU/KVM instances | `virbr0` | Preserved & untouched |
+| **`MYSTIC`** | Mystic Hypervisor control plane & bridges | `mysticd`, `mysticbr0` | Managed by Mystic |
+| **`UNKNOWN`** | Unclassified pre-existing resources | External custom bridges | Preserved as external |
 
-## 3. Transaction Model & State Management
+## 3. Milestone 3C Deep Read-Only Inspection Matrix
 
-Every installer operation is tracked via a deterministic Transaction ID (`TX_<timestamp>_<rand>`) recorded under `/var/lib/mystic/transactions/`.
+When executed via `./install.sh --dry-run` or `./install.sh --plan --json`, the detection engine inspects:
 
-### Transaction Life Cycle States
-- `NOT_STARTED`
-- `IN_PROGRESS`
-- `COMPLETED`
-- `FAILED`
-- `PARTIALLY_COMPLETED`
-- `ROLLED_BACK`
-
-Before any configuration file modification, pre-change state manifests (`system-info.json`, `network-before.json`, `firewall-before.json`, `services-before.json`, `sshd-before.json`) are stored. Secrets (passwords, tokens, keys) are automatically redacted from transaction logs.
-
-## 4. Resource Tiering & Classification
-
-Based on Constitution Section 8, the installer classifies host resources into deterministic tiers:
-
-- **Tiny Profile (< 2 GB RAM, 1 CPU)**: Recommends LXC container-only workloads. Warns against KVM VM creation.
-- **Small Profile (2 - 4 GB RAM)**: Recommends Incus hypervisor.
-- **Standard Profile (4 - 8 GB RAM)**: Recommends Incus + KVM.
-- **Large Profile (8+ GB RAM)**: Recommends Incus + KVM.
-- **Development Host (Windows / Git Bash)**: Rated `UNSUPPORTED_DEV_HOST`.
-
-## 5. Network Safety Engine
-
-The installer includes a Network Safety Engine (`installer/modules/netsafety.sh`) to prevent SSH lockout, default route loss, or management interface destruction:
-- Identifies active management network interface, IP address, and default gateway.
-- Detects running SSH service status and custom SSH listening ports.
-- Guarantees that management interfaces are preserved and never silently replaced by unconfigured network bridges.
-
-## 6. Package Manager Abstraction
-
-Supports `apt` (Debian/Ubuntu) and `dnf`/`yum` (RHEL/Rocky/AlmaLinux) through a unified abstraction interface (`installer/modules/pkgmanager.sh`). Package installation plans calculate missing vs installed packages without executing `apt` or `dnf` during dry-run or plan generation.
+1. **Host Deep Telemetry**: Hostname, non-secret Machine ID status hash, OS release, Kernel, Architecture, Boot mode (UEFI/BIOS), Uptime, Systemd status, cgroup version (v1/v2), Virtualization environment (`systemd-detect-virt`), CPU topology (sockets/cores), CPU model, RAM, Swap, Load average, Root filesystem, Inode usage, and Block devices (`lsblk`).
+2. **KVM Capability Matrix**:
+   - `/dev/kvm` status: `ACCESSIBLE`, `PRESENT_INACCESSIBLE`, `NOT_PRESENT`, `UNAVAILABLE`
+   - KVM Unavailable Reason: Explains missing `/dev/kvm` device nodes (e.g. cloud VPS instances without nested virtualization enabled) or udev permission errors.
+   - CPU Virtualization flags (`vmx`/`svm`) & Nested virtualization status (`AVAILABLE`/`NOT_AVAILABLE`).
+3. **Incus Deep Inspection (Read-Only)**: Queries `incus version`, daemon availability, storage pools & drivers, networks & types, projects, profiles, and instance counts without creating client configs or executing mutations.
+4. **Docker Deep Inspection (Read-Only)**: Queries `docker --version`, daemon availability, running/total container count, network names, and volume counts without stopping/starting containers.
+5. **Pterodactyl / Existing Services**: Detects `wings` daemon, Pterodactyl storage paths, and `pterodactyl0` bridge.
+6. **Port & Service Inventory**: Read-only `ss -tulpn` scan identifying active listening ports (SSH 22, Incus API, Docker daemon, Pterodactyl Wings).
+7. **Coexistence-Aware Provider Recommendation Engine**: Dynamically evaluates `Resource Capacity + Hardware Virt + Existing Providers + Existing Networks + Existing Storage + Ownership + Coexistence Risk`.
+   - *Example*: A server with 10 CPUs, 64 GB RAM, Incus installed, but `/dev/kvm` acceleration missing, dynamically recommends **Incus** with detailed multi-point rationale.
