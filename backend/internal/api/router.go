@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -53,6 +54,8 @@ func (r *Router) registerRoutes() {
 	r.mux.HandleFunc("GET /api/v1/version", r.handleVersion)
 	r.mux.HandleFunc("GET /api/v1/doctor", r.handleDoctor)
 	r.mux.HandleFunc("GET /api/v1/providers", r.handleProviders)
+	r.mux.HandleFunc("GET /api/v1/providers/incus/preflight", r.handleIncusPreflight)
+	r.mux.HandleFunc("GET /api/v1/providers/preflight", r.handleIncusPreflight)
 	r.mux.HandleFunc("GET /api/v1/providers/incus/images", r.handleIncusImages)
 	r.mux.HandleFunc("GET /api/v1/providers/incus/resources", r.handleIncusResources)
 	r.mux.HandleFunc("GET /api/v1/instances", r.handleInstances)
@@ -95,8 +98,8 @@ func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
 
 func (r *Router) handleVersion(w http.ResponseWriter, req *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"version": "0.7.0-milestone5",
-		"target":  "Milestone 5 — Real Incus Workload Provisioning & Provider Execution",
+		"version": "0.8.0-milestone7",
+		"target":  "Milestone 7 — Real VPS Integration & Controlled Incus Validation",
 	})
 }
 
@@ -110,6 +113,7 @@ func (r *Router) handleDoctor(w http.ResponseWriter, req *http.Request) {
 			{"component": "incus_provider_driver", "status": "ACTIVE"},
 			{"component": "port_allocator_engine", "status": "OK"},
 			{"component": "workload_provisioning_engine", "status": "OK"},
+			{"component": "provider_preflight_engine", "status": "OK"},
 		},
 	})
 }
@@ -119,6 +123,15 @@ func (r *Router) handleProviders(w http.ResponseWriter, req *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"providers": providersMap,
 	})
+}
+
+func (r *Router) handleIncusPreflight(w http.ResponseWriter, req *http.Request) {
+	res, err := r.workloadManager.GetProviderPreflight(req.Context(), "incus")
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, res)
 }
 
 func (r *Router) handleIncusImages(w http.ResponseWriter, req *http.Request) {
@@ -253,7 +266,7 @@ func (r *Router) handleApproveWorkload(w http.ResponseWriter, req *http.Request)
 	id = strings.TrimSuffix(id, "/approve")
 
 	if err := r.workloadManager.ApprovePlan(req.Context(), id); err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeWorkloadError(w, err)
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
@@ -268,11 +281,7 @@ func (r *Router) handleProvisionWorkload(w http.ResponseWriter, req *http.Reques
 
 	wl, err := r.workloadManager.ProvisionWorkload(req.Context(), id)
 	if err != nil {
-		jsonResponse(w, http.StatusOK, map[string]interface{}{
-			"workload": wl,
-			"error":    err.Error(),
-			"message":  "Provisioning request processed. Explicit provider status reported.",
-		})
+		writeWorkloadError(w, err)
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
@@ -287,7 +296,7 @@ func (r *Router) handleStartWorkload(w http.ResponseWriter, req *http.Request) {
 
 	wl, err := r.workloadManager.StartWorkload(req.Context(), id)
 	if err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeWorkloadError(w, err)
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
@@ -301,7 +310,7 @@ func (r *Router) handleStopWorkload(w http.ResponseWriter, req *http.Request) {
 
 	wl, err := r.workloadManager.StopWorkload(req.Context(), id, false)
 	if err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeWorkloadError(w, err)
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
@@ -315,7 +324,7 @@ func (r *Router) handleRestartWorkload(w http.ResponseWriter, req *http.Request)
 
 	wl, err := r.workloadManager.RestartWorkload(req.Context(), id)
 	if err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeWorkloadError(w, err)
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
@@ -326,7 +335,7 @@ func (r *Router) handleRestartWorkload(w http.ResponseWriter, req *http.Request)
 func (r *Router) handleDeleteWorkload(w http.ResponseWriter, req *http.Request) {
 	id := extractPathID(req.URL.Path, "/api/v1/workloads/")
 	if err := r.workloadManager.DeleteWorkload(req.Context(), id); err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeWorkloadError(w, err)
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]string{
@@ -340,12 +349,36 @@ func (r *Router) handleReconcileWorkload(w http.ResponseWriter, req *http.Reques
 
 	wl, err := r.workloadManager.ReconcileWorkload(req.Context(), id)
 	if err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeWorkloadError(w, err)
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"workload": wl,
 	})
+}
+
+func writeWorkloadError(w http.ResponseWriter, err error) {
+	if errors.Is(err, workloads.ErrWorkloadNotFound) {
+		jsonResponse(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, workloads.ErrPlanNotApproved) || errors.Is(err, workloads.ErrPlanInvalidated) || errors.Is(err, workloads.ErrIllegalStateTransition) {
+		jsonResponse(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, workloads.ErrOwnershipConflict) || errors.Is(err, workloads.ErrWorkloadConfigConflict) || errors.Is(err, workloads.ErrOperationAlreadyInProgress) {
+		jsonResponse(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, workloads.ErrProviderCapabilityMissing) {
+		jsonResponse(w, http.StatusNotImplemented, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, interfaces.ErrProviderUnavailable) {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 }
 
 func extractPathID(fullPath, prefix string) string {

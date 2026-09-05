@@ -1,6 +1,6 @@
 # Mystic Hypervisor — Security Policy & Model
 
-**Status:** Milestone 5 — Real Incus Workload Provisioning & Provider Execution  
+**Status:** Milestone 7 — Real VPS Integration & Controlled Incus Validation  
 **Reference Document:** `PROJECT_CONSTITUTION.md`
 
 ## 1. Security Architecture & Principles
@@ -16,12 +16,18 @@ Mystic Hypervisor is designed with a **Secure by Default** posture across contro
 - **No Lockout Protection**: The installer Network Safety Engine verifies active SSH sessions, SSH listening ports, and management routes before applying network changes to prevent administrator lockout.
 - **Secret Redaction**: Automatic stripping and masking of secrets (passwords, tokens, private keys, session cookies) in application logs and installer transaction state files.
 
-## 2. Real Incus Provisioning & Provider Security (Milestone 5)
+## 2. Real Incus Provisioning & Provider Security (Milestones 5–7)
 
 - **Safe Command Executions**: All hypervisor operations (`incus list`, `incus launch`, `incus start`, etc.) execute via strict `exec.CommandContext` parameter arrays (no shell string concatenation or evaluation).
 - **Explicit Approval Boundary**: Workload specifications and provisioning plans MUST be explicitly approved by an administrator before hypervisor creation commands are dispatched.
 - **Resource Boundary Limits**: Memory, CPU, and storage limits are validated prior to plan generation to prevent resource exhaustion attacks on target hosts.
 - **Zero Provider Assumption**: Non-Linux development environments safely report `interfaces.ErrProviderUnavailable` rather than falling back to unauthenticated or unsafe mock commands.
+- **Delete Safety & Ownership Metadata**: Instances created by Mystic carry explicit metadata labels (`user.mystic.owned = "true"`). Deletion operations verify ownership to prevent unauthorized or accidental deletion of external host resources (`ErrOwnershipConflict`).
+- **Plan Immutability Enforcement**: Cryptographic `PlanHash` verification ensures that unapproved or mutated plans cannot be provisioned (`ErrPlanInvalidated`).
+- **State Transition Guard**: Illegal state transitions (e.g. stopping an un-provisioned workload) are blocked at the domain boundary (`ErrIllegalStateTransition`).
+- **Read-Only Preflight & Existing Infrastructure Protection**: Discovery queries (`incus info`, `incus list`, `incus network list`, `incus storage list`, `incus image list`) are strictly read-only. Pre-existing hypervisor workloads, bridges, and storage pools are preserved and never automatically adopted, mutated, or deleted.
+- **Structured Audit Logging**: All mutating operations emit audit logs with actor identity, action type, target resource, plan hash, and result code.
+
 
 ## 3. Network Exposure Security Policy (Milestone 3E / Milestone 4)
 
@@ -41,5 +47,6 @@ Mystic Hypervisor is designed with a **Secure by Default** posture across contro
 1. **No Credentials in Source**: Code and repository assets must never contain hardcoded secrets, private keys, API tokens, or default passwords.
 2. **Log & Transaction Redaction**: `backend/internal/logging` and `installer/modules/transaction.sh` sanitize all log writers and step metadata.
 3. **Environment & Filesystem**: Sensitive configuration files stored under `/etc/mystic/` or `/var/lib/mystic/` must have file permissions `0600` or `0700` owned by `mystic:mystic`.
+
 
 

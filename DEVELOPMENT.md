@@ -1,6 +1,6 @@
 # Mystic Hypervisor — Developer Guide
 
-**Status:** Milestone 5 — Real Incus Workload Provisioning & Provider Execution  
+**Status:** Milestone 7 — Real VPS Integration & Controlled Incus Validation  
 **Reference Document:** `PROJECT_CONSTITUTION.md`
 
 ## Target Platform & Environment Notice
@@ -53,6 +53,10 @@ npm run build
 - **Milestone 3E — Network Exposure Configuration & Forwarding Model**: COMPLETED (Exposure modes, gateway data model, UI component, detected vs configuration JSON separation).
 - **Milestone 4 — Workload Networking & Port Allocation Engine**: COMPLETED (Workload network config, allocation engine, 1:1 range preview, conflict classification, REST API endpoints, dynamic network topology diagram).
 - **Milestone 5 — Real Incus Workload Provisioning & Provider Execution**: COMPLETED (Real Incus driver execution, workload domain model, pre-flight spec validation, provisioning plan generator, explicit administrator approval boundary, lifecycle controls, state reconciliation, React provisioning wizard UI).
+- **Milestone 6 — Provider Execution Safety, Idempotency & Failure Recovery**: COMPLETED (Execution Guard layer, deterministic OpKey idempotency, delete safety with user.mystic.owned validation, SHA-256 PlanHash immutability, state-aware lifecycle guards, context timeouts, SUCCESS/FAILED/UNKNOWN outcome classification, unknown state reconciliation recovery, structured audit logging, HTTP domain error code mapping).
+- **Milestone 7 — Real VPS Integration & Controlled Incus Validation**: COMPLETED (Provider discovery & preflight health model, read-only existing workload/network/storage discovery, ownership classification, dynamic image/network/storage selection in UI wizard, integration test template helper, Phase A-G manual real-VPS validation procedure, 100% offline unit-test safety).
+
+
 
 
 

@@ -1,6 +1,6 @@
 # Mystic Hypervisor — System Architecture
 
-**Status:** Milestone 5 — Real Incus Workload Provisioning & Provider Execution  
+**Status:** Milestone 7 — Real VPS Integration & Controlled Incus Validation  
 **Reference Document:** `PROJECT_CONSTITUTION.md`
 
 ## 1. Overview
@@ -19,6 +19,10 @@ Mystic Hypervisor is structured as a compiled Go control plane daemon (`mysticd`
             Auth           Monitoring       Audit
               |               |               |
               +---------------+---------------+
+                              |
+                    Provider Preflight Engine
+                              |
+                     Execution Guard Layer
                               |
                      Provider Abstraction
                               |
@@ -70,6 +74,26 @@ Mystic Hypervisor features a production-grade workload provisioning & lifecycle 
    - Flags state mismatches (`RUNNING` in DB vs `STOPPED` in provider) as `DRIFTED`.
 4. **Zero Fake Data Baseline**:
    - Empty workloads state (`No workloads found`) is preserved until real provider instances are queried or created by an administrator.
+
+## 5. Provider Execution Safety & Failure Recovery (Milestone 6)
+
+1. **Idempotency & Operation Locking (`OpKey`)**: Prevents duplicate executions.
+2. **Delete Safety & Ownership Verification**: Requires `user.mystic.owned = "true"`. External resources are protected from deletion.
+3. **Plan Immutability (`PlanHash`)**: SHA-256 hash checks prevent execution of mutated plans.
+
+## 6. Real VPS Integration & Preflight Validation (Milestone 7)
+
+1. **Provider Discovery & Preflight Engine (`backend/internal/providers/interfaces/preflight.go`)**:
+   - Read-only discovery queries daemon reachability (`incus info --format json`), existing instances (`incus list --format json`), networks (`incus network list --format json`), storage pools (`incus storage list --format json`), and images (`incus image list --format json`).
+   - Categorizes provider health into: `Installed`, `Reachable`, `Operational`, and `Capable`.
+2. **Existing Workload Protection**:
+   - Pre-existing provider workloads are classified as `EXTERNAL` or `MYSTIC_OWNED`. Mystic will preserve and never automatically adopt or mutate external workloads.
+3. **Dynamic Resource Selection**:
+   - Frontend and API dynamically query available networks, storage pools, and image aliases rather than using hardcoded values.
+4. **Controlled Test Workload Protocol**:
+   - Explicit Phase A through G manual test protocol for initial real VPS validation.
+
+
 
 
 

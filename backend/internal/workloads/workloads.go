@@ -32,6 +32,7 @@ const (
 	StatusStopped      WorkloadStatus = "STOPPED"
 	StatusFailed       WorkloadStatus = "FAILED"
 	StatusDrifted      WorkloadStatus = "DRIFTED"
+	StatusUnknown      WorkloadStatus = "UNKNOWN"
 )
 
 // Workload represents a real guest virtual machine or container managed by Mystic.
@@ -53,6 +54,8 @@ type Workload struct {
 	Project            string                           `json:"project"`
 	Profile            string                           `json:"profile"`
 	NetworkConfig      networking.WorkloadNetworkConfig `json:"network_config"`
+	PortRequest        networking.PortAllocationRequest `json:"port_request,omitempty"`
+	PlanHash           string                           `json:"plan_hash,omitempty"`
 	CreatedAt          string                           `json:"created_at"`
 	UpdatedAt          string                           `json:"updated_at"`
 	LastProviderSync   string                           `json:"last_provider_sync"`
@@ -92,6 +95,7 @@ type ProvisioningPlan struct {
 	Risks            []string                    `json:"risks"`
 	IsValid          bool                        `json:"is_valid"`
 	ValidationResult networking.ValidationResult `json:"validation_result"`
+	PlanHash         string                      `json:"plan_hash"`
 	Approved         bool                        `json:"approved"`
 	CreatedAt        string                      `json:"created_at"`
 }

@@ -1,22 +1,21 @@
 package incus
 
-import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"os/exec"
-	"strconv"
-	"strings"
-	"time"
+import "bytes"
+import "context"
+import "encoding/json"
+import "fmt"
+import "os/exec"
+import "strconv"
+import "strings"
+import "time"
 
-	"github.com/mystic-hypervisor/mystic/backend/internal/providers/interfaces"
-)
+import "github.com/mystic-hypervisor/mystic/backend/internal/providers/interfaces"
 
 // IncusProvider implements the Provider interface for Incus hypervisors.
 type IncusProvider struct {
 	socketPath string
 	caps       interfaces.CapabilitySet
+	execRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
 }
 
 // NewIncusProvider creates an Incus provider instance.
@@ -39,6 +38,26 @@ func NewIncusProvider(socketPath string) *IncusProvider {
 	}
 }
 
+// SetExecRunner allows setting a custom execution runner (primarily for unit testing offline).
+func (p *IncusProvider) SetExecRunner(runner func(ctx context.Context, name string, args ...string) ([]byte, error)) {
+	p.execRunner = runner
+}
+
+func (p *IncusProvider) runCmd(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if p.execRunner != nil {
+		return p.execRunner(ctx, name, args...)
+	}
+	cmd := exec.CommandContext(ctx, name, args...)
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(errOut.String()))
+	}
+	return out.Bytes(), nil
+}
+
 func (p *IncusProvider) Name() string {
 	return "incus"
 }
@@ -48,8 +67,8 @@ func (p *IncusProvider) Capabilities() interfaces.CapabilitySet {
 }
 
 func (p *IncusProvider) Ping(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "incus", "version")
-	if err := cmd.Run(); err != nil {
+	_, err := p.runCmd(ctx, "incus", "version")
+	if err != nil {
 		return interfaces.ErrProviderUnavailable
 	}
 	return nil
@@ -79,16 +98,29 @@ func (p *IncusProvider) NetworkProvider() (interfaces.NetworkProvider, bool) {
 	return p, true
 }
 
-// --- InstanceProvider Implementation ---
+// Raw JSON structures returned by Incus CLI queries
+type incusRawServerInfo struct {
+	Environment struct {
+		Addresses     []string `json:"addresses"`
+		Architecture  string   `json:"architecture"`
+		Driver        string   `json:"driver"`
+		KernelVersion string   `json:"kernel_version"`
+		OSName        string   `json:"os_name"`
+		OSVersion     string   `json:"os_version"`
+		ServerVersion string   `json:"server_version"`
+		Storage       string   `json:"storage"`
+		StorageDriver string   `json:"storage_driver"`
+	} `json:"environment"`
+}
 
 type incusRawInstance struct {
-	Name    string `json:"name"`
-	Status  string `json:"status"`
-	Type    string `json:"type"`
-	State   struct {
-		Status    string `json:"status"`
-		StatusCode int   `json:"status_code"`
-		Network   map[string]struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Type   string `json:"type"`
+	State  struct {
+		Status     string `json:"status"`
+		StatusCode int    `json:"status_code"`
+		Network    map[string]struct {
 			Addresses []struct {
 				Family  string `json:"family"`
 				Address string `json:"address"`
@@ -100,20 +132,192 @@ type incusRawInstance struct {
 	Created string            `json:"created_at"`
 }
 
+type incusRawNetworkDetail struct {
+	Name    string            `json:"name"`
+	Type    string            `json:"type"`
+	Managed bool              `json:"managed"`
+	Status  string            `json:"status"`
+	Config  map[string]string `json:"config"`
+}
+
+type incusRawStorageDetail struct {
+	Name   string `json:"name"`
+	Driver string `json:"driver"`
+	Status string `json:"status"`
+}
+
+type incusRawImageDetail struct {
+	Fingerprint  string `json:"fingerprint"`
+	Architecture string `json:"architecture"`
+	Type         string `json:"type"`
+	Size         int64  `json:"size"`
+	CreatedAt    string `json:"created_at"`
+	Aliases      []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	} `json:"aliases"`
+	Properties map[string]string `json:"properties"`
+}
+
+// Preflight performs read-only provider discovery and health status evaluation.
+func (p *IncusProvider) Preflight(ctx context.Context) (*interfaces.ProviderPreflightResult, error) {
+	res := &interfaces.ProviderPreflightResult{
+		Provider:     "incus",
+		Availability: interfaces.AvailabilityUnavailable,
+		HealthStatus: interfaces.ProviderHealthStatus{
+			Installed:   false,
+			Reachable:   false,
+			Operational: false,
+			Capable:     false,
+		},
+		Capabilities:      p.caps.Slice(),
+		ExistingInstances: []interfaces.PreflightInstance{},
+		Networks:          []interfaces.DiscoveredNetwork{},
+		StoragePools:      []interfaces.DiscoveredStoragePool{},
+		Images:            []interfaces.DiscoveredImage{},
+		Warnings:          []string{},
+		Blockers:          []string{},
+	}
+
+	// 1. Installed Check (look in PATH or runner override)
+	if p.execRunner == nil {
+		if _, lookErr := exec.LookPath("incus"); lookErr != nil {
+			res.Blockers = append(res.Blockers, "Incus CLI binary 'incus' not found in system PATH")
+			return res, nil
+		}
+	}
+	res.HealthStatus.Installed = true
+
+	// 2. Reachable Check (incus info --format json)
+	infoBytes, err := p.runCmd(ctx, "incus", "info", "--format", "json")
+	if err != nil {
+		res.Blockers = append(res.Blockers, fmt.Sprintf("Incus daemon is unreachable or socket error: %v", err))
+		return res, nil
+	}
+	res.HealthStatus.Reachable = true
+
+	var rawInfo incusRawServerInfo
+	if err := json.Unmarshal(infoBytes, &rawInfo); err == nil {
+		osStr := strings.TrimSpace(fmt.Sprintf("%s %s", rawInfo.Environment.OSName, rawInfo.Environment.OSVersion))
+		res.ServerInfo = interfaces.ProviderServerInfo{
+			ServerVersion: rawInfo.Environment.ServerVersion,
+			OS:            osStr,
+			Kernel:        rawInfo.Environment.KernelVersion,
+			Architecture:  rawInfo.Environment.Architecture,
+			KVMSupported:  rawInfo.Environment.Driver == "qemu" || rawInfo.Environment.Driver == "kvm",
+		}
+	}
+
+	// 3. Existing Instances Discovery
+	listBytes, err := p.runCmd(ctx, "incus", "list", "--format", "json")
+	if err == nil {
+		var rawInsts []incusRawInstance
+		if json.Unmarshal(listBytes, &rawInsts) == nil {
+			for _, item := range rawInsts {
+				ownership := interfaces.OwnershipExternal
+				if item.Config["user.mystic.owned"] == "true" || item.Config["mystic.owned"] == "true" {
+					ownership = interfaces.OwnershipMysticOwned
+				}
+				res.ExistingInstances = append(res.ExistingInstances, interfaces.PreflightInstance{
+					Name:      item.Name,
+					Type:      item.Type,
+					State:     item.Status,
+					Ownership: ownership,
+					IPAddress: extractPrimaryIP(item),
+				})
+			}
+		}
+	}
+
+	// 4. Networks Discovery
+	netBytes, err := p.runCmd(ctx, "incus", "network", "list", "--format", "json")
+	if err == nil {
+		var rawNets []incusRawNetworkDetail
+		if json.Unmarshal(netBytes, &rawNets) == nil {
+			for _, netItem := range rawNets {
+				res.Networks = append(res.Networks, interfaces.DiscoveredNetwork{
+					Name:    netItem.Name,
+					Type:    netItem.Type,
+					Managed: netItem.Managed,
+					IPv4:    netItem.Config["ipv4.address"],
+					IPv6:    netItem.Config["ipv6.address"],
+					State:   netItem.Status,
+				})
+			}
+		}
+	}
+
+	// 5. Storage Pools Discovery
+	storeBytes, err := p.runCmd(ctx, "incus", "storage", "list", "--format", "json")
+	if err == nil {
+		var rawStore []incusRawStorageDetail
+		if json.Unmarshal(storeBytes, &rawStore) == nil {
+			for _, storeItem := range rawStore {
+				res.StoragePools = append(res.StoragePools, interfaces.DiscoveredStoragePool{
+					Name:   storeItem.Name,
+					Driver: storeItem.Driver,
+					Status: storeItem.Status,
+				})
+			}
+		}
+	}
+
+	// 6. Images Discovery
+	imgBytes, err := p.runCmd(ctx, "incus", "image", "list", "--format", "json")
+	if err == nil {
+		var rawImgs []incusRawImageDetail
+		if json.Unmarshal(imgBytes, &rawImgs) == nil {
+			for _, imgItem := range rawImgs {
+				aliasName := "none"
+				if len(imgItem.Aliases) > 0 {
+					aliasName = imgItem.Aliases[0].Name
+				}
+				res.Images = append(res.Images, interfaces.DiscoveredImage{
+					Fingerprint:  imgItem.Fingerprint,
+					Alias:        aliasName,
+					Description:  imgItem.Properties["description"],
+					OS:           imgItem.Properties["os"],
+					Release:      imgItem.Properties["release"],
+					Architecture: imgItem.Architecture,
+					SizeBytes:    imgItem.Size,
+				})
+			}
+		}
+	}
+
+	res.Availability = interfaces.AvailabilityAvailable
+	res.HealthStatus.Operational = true
+	res.HealthStatus.Capable = true
+
+	if len(res.ExistingInstances) > 0 {
+		extCount := 0
+		for _, inst := range res.ExistingInstances {
+			if inst.Ownership == interfaces.OwnershipExternal {
+				extCount++
+			}
+		}
+		if extCount > 0 {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("%d existing external provider resource(s) detected. Mystic will preserve and not automatically adopt them.", extCount))
+		}
+	}
+
+	return res, nil
+}
+
+// --- InstanceProvider Implementation ---
+
 func (p *IncusProvider) ListInstances(ctx context.Context) ([]interfaces.Instance, error) {
 	if err := p.Ping(ctx); err != nil {
 		return nil, interfaces.ErrProviderUnavailable
 	}
 
-	cmd := exec.CommandContext(ctx, "incus", "list", "--format", "json")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
+	outBytes, err := p.runCmd(ctx, "incus", "list", "--format", "json")
+	if err != nil {
 		return nil, fmt.Errorf("failed to query incus instances: %w", err)
 	}
 
 	var raw []incusRawInstance
-	if err := json.Unmarshal(out.Bytes(), &raw); err != nil {
+	if err := json.Unmarshal(outBytes, &raw); err != nil {
 		return nil, fmt.Errorf("failed to parse incus instances json: %w", err)
 	}
 
@@ -132,6 +336,11 @@ func (p *IncusProvider) ListInstances(ctx context.Context) ([]interfaces.Instanc
 
 		createdTime, _ := time.Parse(time.RFC3339, item.Created)
 
+		labels := make(map[string]string)
+		for k, v := range item.Config {
+			labels[k] = v
+		}
+
 		instancesList = append(instancesList, interfaces.Instance{
 			ID:        item.Name,
 			Name:      item.Name,
@@ -144,6 +353,7 @@ func (p *IncusProvider) ListInstances(ctx context.Context) ([]interfaces.Instanc
 				CPUCores:    cores,
 				MemoryBytes: memBytes,
 			},
+			Labels:    labels,
 			CreatedAt: createdTime,
 			UpdatedAt: time.Now(),
 		})
@@ -187,18 +397,26 @@ func (p *IncusProvider) CreateInstance(ctx context.Context, inst *interfaces.Ins
 	}
 	args = append(args, inst.Name)
 
-	cmd := exec.CommandContext(ctx, "incus", args...)
-	if err := cmd.Run(); err != nil {
+	if _, err := p.runCmd(ctx, "incus", args...); err != nil {
 		return nil, fmt.Errorf("incus launch failed: %w", err)
 	}
 
 	// Configure CPU & Memory if specified
 	if inst.Limits.CPUCores > 0 {
-		_ = exec.CommandContext(ctx, "incus", "config", "set", inst.Name, "limits.cpu", strconv.Itoa(inst.Limits.CPUCores)).Run()
+		_, _ = p.runCmd(ctx, "incus", "config", "set", inst.Name, "limits.cpu", strconv.Itoa(inst.Limits.CPUCores))
 	}
 	if inst.Limits.MemoryBytes > 0 {
 		memMB := inst.Limits.MemoryBytes / (1024 * 1024)
-		_ = exec.CommandContext(ctx, "incus", "config", "set", inst.Name, "limits.memory", fmt.Sprintf("%dMB", memMB)).Run()
+		_, _ = p.runCmd(ctx, "incus", "config", "set", inst.Name, "limits.memory", fmt.Sprintf("%dMB", memMB))
+	}
+
+	// Set Mystic ownership labels if present
+	if inst.Labels != nil {
+		for k, v := range inst.Labels {
+			if strings.HasPrefix(k, "user.mystic.") || strings.HasPrefix(k, "mystic.") {
+				_, _ = p.runCmd(ctx, "incus", "config", "set", inst.Name, k, v)
+			}
+		}
 	}
 
 	return p.GetInstance(ctx, inst.Name)
@@ -208,8 +426,7 @@ func (p *IncusProvider) StartInstance(ctx context.Context, idOrName string) erro
 	if err := p.Ping(ctx); err != nil {
 		return interfaces.ErrProviderUnavailable
 	}
-	cmd := exec.CommandContext(ctx, "incus", "start", idOrName)
-	if err := cmd.Run(); err != nil {
+	if _, err := p.runCmd(ctx, "incus", "start", idOrName); err != nil {
 		return fmt.Errorf("failed to start instance %s: %w", idOrName, err)
 	}
 	return nil
@@ -223,8 +440,7 @@ func (p *IncusProvider) StopInstance(ctx context.Context, idOrName string, force
 	if force {
 		args = append(args, "--force")
 	}
-	cmd := exec.CommandContext(ctx, "incus", args...)
-	if err := cmd.Run(); err != nil {
+	if _, err := p.runCmd(ctx, "incus", args...); err != nil {
 		return fmt.Errorf("failed to stop instance %s: %w", idOrName, err)
 	}
 	return nil
@@ -234,8 +450,7 @@ func (p *IncusProvider) RestartInstance(ctx context.Context, idOrName string) er
 	if err := p.Ping(ctx); err != nil {
 		return interfaces.ErrProviderUnavailable
 	}
-	cmd := exec.CommandContext(ctx, "incus", "restart", idOrName)
-	if err := cmd.Run(); err != nil {
+	if _, err := p.runCmd(ctx, "incus", "restart", idOrName); err != nil {
 		return fmt.Errorf("failed to restart instance %s: %w", idOrName, err)
 	}
 	return nil
@@ -245,8 +460,7 @@ func (p *IncusProvider) DeleteInstance(ctx context.Context, idOrName string) err
 	if err := p.Ping(ctx); err != nil {
 		return interfaces.ErrProviderUnavailable
 	}
-	cmd := exec.CommandContext(ctx, "incus", "delete", idOrName, "--force")
-	if err := cmd.Run(); err != nil {
+	if _, err := p.runCmd(ctx, "incus", "delete", idOrName, "--force"); err != nil {
 		return fmt.Errorf("failed to delete instance %s: %w", idOrName, err)
 	}
 	return nil
@@ -256,8 +470,8 @@ func (p *IncusProvider) RenameInstance(ctx context.Context, oldName, newName str
 	if err := p.Ping(ctx); err != nil {
 		return interfaces.ErrProviderUnavailable
 	}
-	cmd := exec.CommandContext(ctx, "incus", "rename", oldName, newName)
-	return cmd.Run()
+	_, err := p.runCmd(ctx, "incus", "rename", oldName, newName)
+	return err
 }
 
 func (p *IncusProvider) ResizeInstance(ctx context.Context, idOrName string, limits interfaces.ResourceLimits) error {
@@ -265,11 +479,11 @@ func (p *IncusProvider) ResizeInstance(ctx context.Context, idOrName string, lim
 		return interfaces.ErrProviderUnavailable
 	}
 	if limits.CPUCores > 0 {
-		_ = exec.CommandContext(ctx, "incus", "config", "set", idOrName, "limits.cpu", strconv.Itoa(limits.CPUCores)).Run()
+		_, _ = p.runCmd(ctx, "incus", "config", "set", idOrName, "limits.cpu", strconv.Itoa(limits.CPUCores))
 	}
 	if limits.MemoryBytes > 0 {
 		memMB := limits.MemoryBytes / (1024 * 1024)
-		_ = exec.CommandContext(ctx, "incus", "config", "set", idOrName, "limits.memory", fmt.Sprintf("%dMB", memMB)).Run()
+		_, _ = p.runCmd(ctx, "incus", "config", "set", idOrName, "limits.memory", fmt.Sprintf("%dMB", memMB))
 	}
 	return nil
 }
@@ -287,31 +501,18 @@ func (p *IncusProvider) GetInstanceMetrics(ctx context.Context, idOrName string)
 
 // --- ImageProvider Implementation ---
 
-type incusRawImage struct {
-	Fingerprint string   `json:"fingerprint"`
-	Aliases     []struct {
-		Name string `json:"name"`
-	} `json:"aliases"`
-	Architecture string `json:"architecture"`
-	Type         string `json:"type"`
-	Size         int64  `json:"size"`
-	CreatedAt    string `json:"created_at"`
-}
-
 func (p *IncusProvider) ListImages(ctx context.Context) ([]interfaces.Image, error) {
 	if err := p.Ping(ctx); err != nil {
 		return nil, interfaces.ErrProviderUnavailable
 	}
 
-	cmd := exec.CommandContext(ctx, "incus", "image", "list", "--format", "json")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
+	outBytes, err := p.runCmd(ctx, "incus", "image", "list", "--format", "json")
+	if err != nil {
 		return nil, fmt.Errorf("failed to query incus images: %w", err)
 	}
 
-	var raw []incusRawImage
-	if err := json.Unmarshal(out.Bytes(), &raw); err != nil {
+	var raw []incusRawImageDetail
+	if err := json.Unmarshal(outBytes, &raw); err != nil {
 		return nil, fmt.Errorf("failed to parse incus images json: %w", err)
 	}
 
@@ -355,8 +556,7 @@ func (p *IncusProvider) DownloadImage(ctx context.Context, server, alias string)
 	if err := p.Ping(ctx); err != nil {
 		return nil, interfaces.ErrProviderUnavailable
 	}
-	cmd := exec.CommandContext(ctx, "incus", "image", "copy", fmt.Sprintf("%s:%s", server, alias), "local:", "--alias", alias)
-	if err := cmd.Run(); err != nil {
+	if _, err := p.runCmd(ctx, "incus", "image", "copy", fmt.Sprintf("%s:%s", server, alias), "local:", "--alias", alias); err != nil {
 		return nil, fmt.Errorf("failed to copy image %s from %s: %w", alias, server, err)
 	}
 	return p.GetImage(ctx, alias)
@@ -366,8 +566,8 @@ func (p *IncusProvider) DeleteImage(ctx context.Context, fingerprint string) err
 	if err := p.Ping(ctx); err != nil {
 		return interfaces.ErrProviderUnavailable
 	}
-	cmd := exec.CommandContext(ctx, "incus", "image", "delete", fingerprint)
-	return cmd.Run()
+	_, err := p.runCmd(ctx, "incus", "image", "delete", fingerprint)
+	return err
 }
 
 // --- SnapshotProvider Implementation ---
@@ -384,8 +584,7 @@ func (p *IncusProvider) CreateSnapshot(ctx context.Context, instanceID, snapshot
 	if stateful {
 		args = append(args, "--stateful")
 	}
-	cmd := exec.CommandContext(ctx, "incus", args...)
-	if err := cmd.Run(); err != nil {
+	if _, err := p.runCmd(ctx, "incus", args...); err != nil {
 		return nil, err
 	}
 	return &interfaces.Snapshot{
@@ -400,39 +599,32 @@ func (p *IncusProvider) RestoreSnapshot(ctx context.Context, instanceID, snapsho
 	if err := p.Ping(ctx); err != nil {
 		return interfaces.ErrProviderUnavailable
 	}
-	cmd := exec.CommandContext(ctx, "incus", "snapshot", "restore", instanceID, snapshotName)
-	return cmd.Run()
+	_, err := p.runCmd(ctx, "incus", "snapshot", "restore", instanceID, snapshotName)
+	return err
 }
 
 func (p *IncusProvider) DeleteSnapshot(ctx context.Context, instanceID, snapshotName string) error {
 	if err := p.Ping(ctx); err != nil {
 		return interfaces.ErrProviderUnavailable
 	}
-	cmd := exec.CommandContext(ctx, "incus", "snapshot", "delete", instanceID, snapshotName)
-	return cmd.Run()
+	_, err := p.runCmd(ctx, "incus", "snapshot", "delete", instanceID, snapshotName)
+	return err
 }
 
 // --- StorageProvider Implementation ---
-
-type incusRawStoragePool struct {
-	Name   string `json:"name"`
-	Driver string `json:"driver"`
-}
 
 func (p *IncusProvider) ListStoragePools(ctx context.Context) ([]interfaces.StoragePool, error) {
 	if err := p.Ping(ctx); err != nil {
 		return nil, interfaces.ErrProviderUnavailable
 	}
 
-	cmd := exec.CommandContext(ctx, "incus", "storage", "list", "--format", "json")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
+	outBytes, err := p.runCmd(ctx, "incus", "storage", "list", "--format", "json")
+	if err != nil {
 		return nil, err
 	}
 
-	var raw []incusRawStoragePool
-	if err := json.Unmarshal(out.Bytes(), &raw); err != nil {
+	var raw []incusRawStorageDetail
+	if err := json.Unmarshal(outBytes, &raw); err != nil {
 		return nil, err
 	}
 
@@ -461,25 +653,18 @@ func (p *IncusProvider) GetStoragePool(ctx context.Context, name string) (*inter
 
 // --- NetworkProvider Implementation ---
 
-type incusRawNetwork struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
-}
-
 func (p *IncusProvider) ListNetworks(ctx context.Context) ([]interfaces.Network, error) {
 	if err := p.Ping(ctx); err != nil {
 		return nil, interfaces.ErrProviderUnavailable
 	}
 
-	cmd := exec.CommandContext(ctx, "incus", "network", "list", "--format", "json")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
+	outBytes, err := p.runCmd(ctx, "incus", "network", "list", "--format", "json")
+	if err != nil {
 		return nil, err
 	}
 
-	var raw []incusRawNetwork
-	if err := json.Unmarshal(out.Bytes(), &raw); err != nil {
+	var raw []incusRawNetworkDetail
+	if err := json.Unmarshal(outBytes, &raw); err != nil {
 		return nil, err
 	}
 
@@ -489,6 +674,7 @@ func (p *IncusProvider) ListNetworks(ctx context.Context) ([]interfaces.Network,
 			Name:      item.Name,
 			Type:      item.Type,
 			ManagedBy: "incus",
+			CIDR:      item.Config["ipv4.address"],
 		})
 	}
 	return nets, nil

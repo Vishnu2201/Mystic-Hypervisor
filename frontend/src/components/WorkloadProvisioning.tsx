@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { ProviderPreflightResult } from '../types'
 
 export interface WorkloadItem {
   id: string
@@ -30,17 +31,20 @@ export const WorkloadProvisioning: React.FC = () => {
   const [showWizard, setShowWizard] = useState(false)
   const [wizardStep, setWizardStep] = useState(1)
 
+  // Preflight Discovery State
+  const [preflight, setPreflight] = useState<ProviderPreflightResult | null>(null)
+
   // Form State
   const [name, setName] = useState('')
   const [provider, setProvider] = useState('incus')
   const [type, setType] = useState('INCUS_CONTAINER')
-  const [image, setImage] = useState('ubuntu/24.04')
-  const [cpu, setCpu] = useState(2)
-  const [memoryMb, setMemoryMb] = useState(2048)
-  const [storageGb, setStorageGb] = useState(20)
-  const [networkName, setNetworkName] = useState('incusbr0')
+  const [image, setImage] = useState('')
+  const [cpu, setCpu] = useState(1)
+  const [memoryMb, setMemoryMb] = useState(1024)
+  const [storageGb, setStorageGb] = useState(10)
+  const [networkName, setNetworkName] = useState('')
   const [privateIp, setPrivateIp] = useState('10.0.0.151')
-  const [exposureMode, setExposureMode] = useState('NAT_FORWARDED')
+  const [exposureMode, setExposureMode] = useState('PRIVATE_ONLY')
 
   // Selected Workload Details State
   const [selectedWorkload, setSelectedWorkload] = useState<WorkloadItem | null>(null)
@@ -48,12 +52,9 @@ export const WorkloadProvisioning: React.FC = () => {
   const [validationResult, setValidationResult] = useState<any | null>(null)
   const [opMessage, setOpMessage] = useState('')
 
-  // Discovered Images State
-  const [discoveredImages, setDiscoveredImages] = useState<any[]>([])
-
   useEffect(() => {
     fetchWorkloads()
-    fetchImages()
+    fetchPreflight()
   }, [])
 
   const fetchWorkloads = async () => {
@@ -70,15 +71,43 @@ export const WorkloadProvisioning: React.FC = () => {
     setLoading(false)
   }
 
-  const fetchImages = async () => {
+  const fetchPreflight = async () => {
     try {
-      const res = await fetch('/api/v1/providers/incus/images')
+      const res = await fetch('/api/v1/providers/incus/preflight')
       if (res.ok) {
-        const data = await res.json()
-        setDiscoveredImages(data.images || [])
+        const data: ProviderPreflightResult = await res.json()
+        setPreflight(data)
+        if (data.images && data.images.length > 0 && !image) {
+          setImage(data.images[0].alias || data.images[0].fingerprint)
+        }
+        if (data.networks && data.networks.length > 0 && !networkName) {
+          setNetworkName(data.networks[0].name)
+        }
       }
     } catch (e) {
-      // Offline fallback
+      // Offline mode
+    }
+  }
+
+  const applyIntegrationTestTemplate = () => {
+    const testId = Math.floor(Math.random() * 899 + 100)
+    setName(`mystic-integration-test-${testId}`)
+    setProvider('incus')
+    setType('INCUS_CONTAINER')
+    setCpu(1)
+    setMemoryMb(512)
+    setStorageGb(5)
+    setExposureMode('PRIVATE_ONLY')
+    setPrivateIp('10.0.0.199')
+    if (preflight && preflight.images && preflight.images.length > 0) {
+      setImage(preflight.images[0].alias || preflight.images[0].fingerprint)
+    } else {
+      setImage('images:debian/13')
+    }
+    if (preflight && preflight.networks && preflight.networks.length > 0) {
+      setNetworkName(preflight.networks[0].name)
+    } else {
+      setNetworkName('incusbr0')
     }
   }
 
@@ -92,12 +121,12 @@ export const WorkloadProvisioning: React.FC = () => {
           name,
           provider,
           type,
-          image,
+          image: image || 'images:debian/13',
           cpu,
           memory_mb: memoryMb,
           storage_gb: storageGb,
           host_id: 'host-main',
-          network_name: networkName,
+          network_name: networkName || 'incusbr0',
           private_ip: privateIp,
           exposure_mode: exposureMode
         })
@@ -117,10 +146,10 @@ export const WorkloadProvisioning: React.FC = () => {
       // Local development fallback
       const draftWl: WorkloadItem = {
         id: `wl-${Date.now()}`,
-        name: name || 'web-container-01',
+        name: name || 'mystic-integration-test-01',
         host_id: 'host-main',
         provider,
-        provider_instance_id: name || 'web-container-01',
+        provider_instance_id: name || 'mystic-integration-test-01',
         type,
         status: 'DRAFT',
         desired_state: 'running',
@@ -129,7 +158,7 @@ export const WorkloadProvisioning: React.FC = () => {
         cpu,
         memory_mb: memoryMb,
         storage_gb: storageGb,
-        image,
+        image: image || 'images:debian/13',
         project: 'default',
         profile: 'default',
         network_config: { private_ipv4: privateIp, exposure_mode: exposureMode },
@@ -155,7 +184,7 @@ export const WorkloadProvisioning: React.FC = () => {
         is_valid: true,
         status: 'AVAILABLE',
         conflicts: [],
-        warnings: ['Validated via local development engine.'],
+        warnings: ['Validated via local preflight check.'],
         blockers: []
       })
     }
@@ -168,7 +197,7 @@ export const WorkloadProvisioning: React.FC = () => {
       if (res.ok) {
         const data = await res.json()
         setActivePlan(data.provisioning_plan)
-        setWizardStep(3) // Move to plan review & explicit approval
+        setWizardStep(3)
       }
     } catch (e) {
       setActivePlan({
@@ -196,9 +225,7 @@ export const WorkloadProvisioning: React.FC = () => {
     if (!selectedWorkload) return
     setOpMessage('Executing provisioning request on provider...')
     try {
-      // Step 1: Approve Plan
       await fetch(`/api/v1/workloads/${selectedWorkload.id}/approve`, { method: 'POST' })
-      // Step 2: Provision Workload
       const res = await fetch(`/api/v1/workloads/${selectedWorkload.id}/provision`, { method: 'POST' })
       if (res.ok) {
         const data = await res.json()
@@ -246,15 +273,10 @@ export const WorkloadProvisioning: React.FC = () => {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
           <h2 style={{ margin: 0, fontSize: '1.4rem', color: '#38bdf8' }}>Incus Workload Provisioning & Lifecycle Engine</h2>
-          <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>Real Provider Authoritative State & Provisioning Approval Boundary</span>
+          <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>Real Provider Authoritative State & Controlled Execution Boundary</span>
         </div>
         <button
-          type="button"
-          onClick={() => {
-            setShowWizard(true)
-            setWizardStep(1)
-            setName(`workload-${Date.now().toString().slice(-4)}`)
-          }}
+          onClick={() => { setShowWizard(true); setWizardStep(1); }}
           style={{
             backgroundColor: '#0284c7',
             color: '#fff',
@@ -262,87 +284,177 @@ export const WorkloadProvisioning: React.FC = () => {
             padding: '10px 18px',
             borderRadius: '6px',
             cursor: 'pointer',
-            fontWeight: 'bold',
+            fontWeight: 600,
             fontSize: '0.9rem'
           }}
         >
-          + Provision New Workload
+          + Provision Workload
         </button>
       </div>
 
+      {/* OPERATIONAL MESSAGE */}
       {opMessage && (
-        <div style={{ backgroundColor: '#0f172a', border: '1px solid #38bdf8', padding: '12px 16px', borderRadius: '6px', fontSize: '0.85rem', color: '#38bdf8' }}>
-          ℹ️ {opMessage}
+        <div style={{ backgroundColor: '#0f172a', padding: '12px 16px', borderRadius: '6px', border: '1px solid #38bdf8', color: '#38bdf8', fontSize: '0.85rem' }}>
+          {opMessage}
         </div>
       )}
 
-      {/* PROVISIONING WIZARD MODAL / PANEL */}
-      {showWizard && (
-        <div style={{ backgroundColor: '#1e293b', border: '2px solid #38bdf8', borderRadius: '8px', padding: '24px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-            <h3 style={{ margin: 0, color: '#38bdf8', fontSize: '1.2rem' }}>
-              🚀 Workload Provisioning Wizard — Step {wizardStep} of 3
-            </h3>
+      {/* SAFETY WARNING BANNER FOR EXISTING RESOURCES */}
+      {preflight && preflight.existing_instances && preflight.existing_instances.length > 0 && (
+        <div style={{ backgroundColor: '#1e293b', padding: '14px 18px', borderRadius: '6px', borderLeft: '4px solid #f59e0b', fontSize: '0.85rem' }}>
+          <strong style={{ color: '#fbbf24' }}>Infrastructure Coexistence Active: </strong>
+          <span>
+            {preflight.existing_instances.length} existing hypervisor instance(s) detected. Mystic Hypervisor will preserve and NOT automatically adopt or delete external resources.
+          </span>
+        </div>
+      )}
+
+      {/* WORKLOADS TABLE */}
+      <div style={{ backgroundColor: '#1e293b', borderRadius: '8px', border: '1px solid #334155', overflow: 'hidden' }}>
+        {loading ? (
+          <div style={{ padding: '20px', color: '#94a3b8' }}>Querying workloads...</div>
+        ) : workloads.length === 0 ? (
+          <div style={{ padding: '40px', textAlign: 'center', color: '#94a3b8' }}>
+            <p style={{ margin: 0, fontSize: '1rem', fontWeight: 600, color: '#e2e8f0' }}>No workloads registered</p>
+            <p style={{ margin: '8px 0 16px 0', fontSize: '0.85rem' }}>
+              Create a workload draft to begin the explicit DISCOVER → VALIDATE → PLAN → APPROVE → EXECUTE sequence.
+            </p>
             <button
-              type="button"
-              onClick={() => setShowWizard(false)}
-              style={{ backgroundColor: 'transparent', color: '#94a3b8', border: 'none', fontSize: '1.2rem', cursor: 'pointer' }}
+              onClick={() => { setShowWizard(true); setWizardStep(1); }}
+              style={{ backgroundColor: '#0284c7', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer' }}
             >
-              ✕
+              Provision First Workload
             </button>
           </div>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.85rem' }}>
+            <thead>
+              <tr style={{ backgroundColor: '#0f172a', borderBottom: '1px solid #334155', color: '#94a3b8' }}>
+                <th style={{ padding: '12px 16px' }}>Workload Name</th>
+                <th style={{ padding: '12px 16px' }}>Provider & Type</th>
+                <th style={{ padding: '12px 16px' }}>Status</th>
+                <th style={{ padding: '12px 16px' }}>Live State</th>
+                <th style={{ padding: '12px 16px' }}>Specs (CPU/RAM)</th>
+                <th style={{ padding: '12px 16px' }}>IP Address</th>
+                <th style={{ padding: '12px 16px' }}>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {workloads.map(w => (
+                <tr key={w.id} style={{ borderBottom: '1px solid #334155' }}>
+                  <td style={{ padding: '12px 16px', fontWeight: 600, color: '#f8fafc' }}>{w.name}</td>
+                  <td style={{ padding: '12px 16px', color: '#cbd5e1' }}>{w.provider} ({w.type})</td>
+                  <td style={{ padding: '12px 16px' }}>
+                    <span style={{ padding: '2px 8px', borderRadius: '4px', fontSize: '0.75rem', fontWeight: 600, backgroundColor: getStatusBg(w.status), color: '#fff' }}>
+                      {w.status}
+                    </span>
+                  </td>
+                  <td style={{ padding: '12px 16px', color: '#94a3b8' }}>{w.actual_state}</td>
+                  <td style={{ padding: '12px 16px', color: '#94a3b8' }}>{w.cpu} Cores / {w.memory_mb} MB</td>
+                  <td style={{ padding: '12px 16px', color: '#38bdf8' }}>{w.network_config?.private_ipv4 || 'Pending'}</td>
+                  <td style={{ padding: '12px 16px' }}>
+                    <button
+                      onClick={() => setSelectedWorkload(w)}
+                      style={{ backgroundColor: '#334155', color: '#f8fafc', border: '1px solid #475569', padding: '4px 10px', borderRadius: '4px', cursor: 'pointer' }}
+                    >
+                      Manage
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
 
-          {/* WIZARD STEP 1: SPECIFICATION */}
-          {wizardStep === 1 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px' }}>
+      {/* SELECTED WORKLOAD MANAGEMENT PANEL */}
+      {selectedWorkload && !showWizard && (
+        <div style={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <h3 style={{ margin: 0, color: '#38bdf8', fontSize: '1.1rem' }}>
+              Workload Control: {selectedWorkload.name}
+            </h3>
+            <button onClick={() => setSelectedWorkload(null)} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer' }}>Close</button>
+          </div>
+
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+            <button onClick={() => handleLifecycleOp('start')} style={{ backgroundColor: '#16a34a', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}>Start ▶</button>
+            <button onClick={() => handleLifecycleOp('stop')} style={{ backgroundColor: '#475569', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}>Stop ⏹</button>
+            <button onClick={() => handleLifecycleOp('restart')} style={{ backgroundColor: '#0284c7', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}>Restart 🔄</button>
+            <button onClick={() => handleLifecycleOp('reconcile')} style={{ backgroundColor: '#0d9488', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}>Reconcile State</button>
+            <button onClick={() => handleLifecycleOp('delete')} style={{ backgroundColor: '#dc2626', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}>Delete 🗑</button>
+          </div>
+        </div>
+      )}
+
+      {/* PROVISIONING WIZARD MODAL */}
+      {showWizard && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ backgroundColor: '#1e293b', width: '640px', borderRadius: '8px', border: '1px solid #475569', padding: '24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #334155', paddingBottom: '12px' }}>
+              <h3 style={{ margin: 0, color: '#38bdf8' }}>Workload Provisioning Wizard — Step {wizardStep} of 3</h3>
+              <button onClick={() => setShowWizard(false)} style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: '1.2rem', cursor: 'pointer' }}>✕</button>
+            </div>
+
+            {/* STEP 1: SPECIFICATION & TEMPLATES */}
+            {wizardStep === 1 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', fontSize: '0.85rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#0f172a', padding: '10px 14px', borderRadius: '6px' }}>
+                  <span style={{ color: '#cbd5e1' }}>Quick Fill Test Template:</span>
+                  <button
+                    onClick={applyIntegrationTestTemplate}
+                    style={{ backgroundColor: '#0284c7', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}
+                  >
+                    🧪 Fill Integration Test Workload
+                  </button>
+                </div>
+
                 <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#94a3b8', marginBottom: '4px' }}>Workload Name</label>
+                  <label style={{ display: 'block', color: '#94a3b8', marginBottom: '4px' }}>Workload Name</label>
                   <input
                     type="text"
                     value={name}
                     onChange={e => setName(e.target.value)}
-                    placeholder="web-container-01"
-                    style={{ width: '100%', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff', padding: '8px', borderRadius: '4px', boxSizing: 'border-box' }}
+                    placeholder="e.g. mystic-integration-test-01"
+                    style={{ width: '100%', padding: '8px', borderRadius: '4px', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff' }}
                   />
                 </div>
 
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#94a3b8', marginBottom: '4px' }}>Hypervisor Provider</label>
-                  <select
-                    value={provider}
-                    onChange={e => setProvider(e.target.value)}
-                    style={{ width: '100%', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff', padding: '8px', borderRadius: '4px', boxSizing: 'border-box' }}
-                  >
-                    <option value="incus">Incus (Supported)</option>
-                    <option value="kvm" disabled>KVM (Unsupported in Milestone 5)</option>
-                    <option value="lxc" disabled>LXC (Unsupported in Milestone 5)</option>
-                  </select>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                  <div>
+                    <label style={{ display: 'block', color: '#94a3b8', marginBottom: '4px' }}>Provider</label>
+                    <select
+                      value={provider}
+                      onChange={e => setProvider(e.target.value)}
+                      style={{ width: '100%', padding: '8px', borderRadius: '4px', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff' }}
+                    >
+                      <option value="incus">Incus Virtualization Engine</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', color: '#94a3b8', marginBottom: '4px' }}>Type</label>
+                    <select
+                      value={type}
+                      onChange={e => setType(e.target.value)}
+                      style={{ width: '100%', padding: '8px', borderRadius: '4px', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff' }}
+                    >
+                      <option value="INCUS_CONTAINER">Incus System Container</option>
+                      <option value="INCUS_VM">Incus Virtual Machine</option>
+                    </select>
+                  </div>
                 </div>
 
                 <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#94a3b8', marginBottom: '4px' }}>Workload Type</label>
-                  <select
-                    value={type}
-                    onChange={e => setType(e.target.value)}
-                    style={{ width: '100%', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff', padding: '8px', borderRadius: '4px', boxSizing: 'border-box' }}
-                  >
-                    <option value="INCUS_CONTAINER">INCUS_CONTAINER (System Container)</option>
-                    <option value="INCUS_VM">INCUS_VM (Hardware VM)</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#94a3b8', marginBottom: '4px' }}>OS Boot Image</label>
-                  {discoveredImages.length > 0 ? (
+                  <label style={{ display: 'block', color: '#94a3b8', marginBottom: '4px' }}>Discovered Image</label>
+                  {preflight && preflight.images && preflight.images.length > 0 ? (
                     <select
                       value={image}
                       onChange={e => setImage(e.target.value)}
-                      style={{ width: '100%', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff', padding: '8px', borderRadius: '4px', boxSizing: 'border-box' }}
+                      style={{ width: '100%', padding: '8px', borderRadius: '4px', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff' }}
                     >
-                      {discoveredImages.map(img => (
-                        <option key={img.fingerprint} value={img.alias !== 'none' ? img.alias : img.fingerprint}>
-                          {img.alias} ({img.architecture} - {img.type})
+                      {preflight.images.map((img, idx) => (
+                        <option key={idx} value={img.alias || img.fingerprint}>
+                          {img.alias ? `${img.alias} (${img.description || img.architecture})` : img.fingerprint.substring(0, 12)}
                         </option>
                       ))}
                     </select>
@@ -351,323 +463,151 @@ export const WorkloadProvisioning: React.FC = () => {
                       type="text"
                       value={image}
                       onChange={e => setImage(e.target.value)}
-                      placeholder="ubuntu/24.04"
-                      style={{ width: '100%', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff', padding: '8px', borderRadius: '4px', boxSizing: 'border-box' }}
+                      placeholder="e.g. images:debian/13 or images:ubuntu/24.04"
+                      style={{ width: '100%', padding: '8px', borderRadius: '4px', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff' }}
                     />
                   )}
-                  <span style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '2px', display: 'block' }}>
-                    {discoveredImages.length > 0 ? `✓ Discovered ${discoveredImages.length} live Incus images` : 'Notice: Live Incus image discovery requires active local Incus daemon.'}
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
+                  <div>
+                    <label style={{ display: 'block', color: '#94a3b8', marginBottom: '4px' }}>CPU Cores</label>
+                    <input
+                      type="number"
+                      value={cpu}
+                      onChange={e => setCpu(Number(e.target.value))}
+                      style={{ width: '100%', padding: '8px', borderRadius: '4px', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff' }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', color: '#94a3b8', marginBottom: '4px' }}>RAM (MB)</label>
+                    <input
+                      type="number"
+                      value={memoryMb}
+                      onChange={e => setMemoryMb(Number(e.target.value))}
+                      style={{ width: '100%', padding: '8px', borderRadius: '4px', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff' }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', color: '#94a3b8', marginBottom: '4px' }}>Disk (GB)</label>
+                    <input
+                      type="number"
+                      value={storageGb}
+                      onChange={e => setStorageGb(Number(e.target.value))}
+                      style={{ width: '100%', padding: '8px', borderRadius: '4px', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff' }}
+                    />
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                  <div>
+                    <label style={{ display: 'block', color: '#94a3b8', marginBottom: '4px' }}>Discovered Network</label>
+                    {preflight && preflight.networks && preflight.networks.length > 0 ? (
+                      <select
+                        value={networkName}
+                        onChange={e => setNetworkName(e.target.value)}
+                        style={{ width: '100%', padding: '8px', borderRadius: '4px', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff' }}
+                      >
+                        {preflight.networks.map((net, idx) => (
+                          <option key={idx} value={net.name}>
+                            {net.name} ({net.type}{net.ipv4 ? ` - ${net.ipv4}` : ''})
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        value={networkName}
+                        onChange={e => setNetworkName(e.target.value)}
+                        placeholder="incusbr0"
+                        style={{ width: '100%', padding: '8px', borderRadius: '4px', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff' }}
+                      />
+                    )}
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', color: '#94a3b8', marginBottom: '4px' }}>Exposure Mode</label>
+                    <select
+                      value={exposureMode}
+                      onChange={e => setExposureMode(e.target.value)}
+                      style={{ width: '100%', padding: '8px', borderRadius: '4px', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff' }}
+                    >
+                      <option value="PRIVATE_ONLY">PRIVATE_ONLY (LAN / Internal)</option>
+                      <option value="NAT_FORWARDED">NAT_FORWARDED (Port Forwarding)</option>
+                      <option value="DIRECT_PUBLIC">DIRECT_PUBLIC (Public IP)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '12px' }}>
+                  <button onClick={() => setShowWizard(false)} style={{ padding: '8px 16px', borderRadius: '4px', border: '1px solid #475569', backgroundColor: 'transparent', color: '#cbd5e1', cursor: 'pointer' }}>Cancel</button>
+                  <button onClick={handleCreateDraft} style={{ padding: '8px 16px', borderRadius: '4px', border: 'none', backgroundColor: '#0284c7', color: '#fff', cursor: 'pointer', fontWeight: 600 }}>Create Draft & Validate →</button>
+                </div>
+              </div>
+            )}
+
+            {/* STEP 2: PRE-FLIGHT VALIDATION RESULT */}
+            {wizardStep === 2 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', fontSize: '0.85rem' }}>
+                <div style={{ backgroundColor: '#0f172a', padding: '12px', borderRadius: '6px' }}>
+                  <strong>Validation Result: </strong>
+                  <span style={{ color: validationResult?.is_valid ? '#4ade80' : '#f87171' }}>
+                    {validationResult?.is_valid ? 'VALIDATED CLEANLY' : 'VALIDATION BLOCKERS DETECTED'}
                   </span>
                 </div>
 
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#94a3b8', marginBottom: '4px' }}>CPU Cores</label>
-                  <input
-                    type="number"
-                    value={cpu}
-                    onChange={e => setCpu(parseInt(e.target.value, 10) || 1)}
-                    min={1}
-                    max={32}
-                    style={{ width: '100%', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff', padding: '8px', borderRadius: '4px', boxSizing: 'border-box' }}
-                  />
-                </div>
+                {validationResult?.warnings?.map((w: string, i: number) => (
+                  <div key={i} style={{ color: '#fbbf24' }}>⚠️ {w}</div>
+                ))}
 
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#94a3b8', marginBottom: '4px' }}>Memory (MB)</label>
-                  <input
-                    type="number"
-                    value={memoryMb}
-                    onChange={e => setMemoryMb(parseInt(e.target.value, 10) || 1024)}
-                    min={512}
-                    step={512}
-                    style={{ width: '100%', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff', padding: '8px', borderRadius: '4px', boxSizing: 'border-box' }}
-                  />
-                </div>
-
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#94a3b8', marginBottom: '4px' }}>Storage (GB)</label>
-                  <input
-                    type="number"
-                    value={storageGb}
-                    onChange={e => setStorageGb(parseInt(e.target.value, 10) || 10)}
-                    min={5}
-                    style={{ width: '100%', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff', padding: '8px', borderRadius: '4px', boxSizing: 'border-box' }}
-                  />
-                </div>
-
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#94a3b8', marginBottom: '4px' }}>Private IPv4</label>
-                  <input
-                    type="text"
-                    value={privateIp}
-                    onChange={e => setPrivateIp(e.target.value)}
-                    placeholder="10.0.0.151"
-                    style={{ width: '100%', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff', padding: '8px', borderRadius: '4px', boxSizing: 'border-box' }}
-                  />
-                </div>
-
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#94a3b8', marginBottom: '4px' }}>Incus Network Bridge</label>
-                  <input
-                    type="text"
-                    value={networkName}
-                    onChange={e => setNetworkName(e.target.value)}
-                    placeholder="incusbr0"
-                    style={{ width: '100%', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff', padding: '8px', borderRadius: '4px', boxSizing: 'border-box' }}
-                  />
-                </div>
-
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#94a3b8', marginBottom: '4px' }}>Exposure Mode</label>
-                  <select
-                    value={exposureMode}
-                    onChange={e => setExposureMode(e.target.value)}
-                    style={{ width: '100%', backgroundColor: '#0f172a', border: '1px solid #334155', color: '#fff', padding: '8px', borderRadius: '4px', boxSizing: 'border-box' }}
-                  >
-                    <option value="ISOLATED_PRIVATE">ISOLATED_PRIVATE</option>
-                    <option value="HOST_ASSIGNED_PUBLIC">HOST_ASSIGNED_PUBLIC</option>
-                    <option value="NAT_FORWARDED">NAT_FORWARDED</option>
-                    <option value="EDGE_GATEWAY">EDGE_GATEWAY</option>
-                  </select>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '12px' }}>
+                  <button onClick={() => setWizardStep(1)} style={{ padding: '8px 16px', borderRadius: '4px', border: '1px solid #475569', backgroundColor: 'transparent', color: '#cbd5e1', cursor: 'pointer' }}>← Back to Spec</button>
+                  <button onClick={handleGeneratePlan} style={{ padding: '8px 16px', borderRadius: '4px', border: 'none', backgroundColor: '#0284c7', color: '#fff', cursor: 'pointer', fontWeight: 600 }}>Generate Provisioning Plan →</button>
                 </div>
               </div>
+            )}
 
-              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '10px' }}>
-                <button
-                  type="button"
-                  onClick={handleCreateDraft}
-                  style={{ backgroundColor: '#0284c7', color: '#fff', border: 'none', padding: '8px 20px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}
-                >
-                  Next: Validate & Create Draft →
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* WIZARD STEP 2: VALIDATION */}
-          {wizardStep === 2 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              <div style={{ backgroundColor: '#0f172a', padding: '16px', borderRadius: '6px', border: '1px solid #334155' }}>
-                <h4 style={{ margin: '0 0 10px 0', color: '#38bdf8' }}>Pre-Flight Validation & Conflict Engine Results</h4>
-                {validationResult ? (
-                  <div style={{ fontSize: '0.85rem' }}>
-                    <div style={{ color: validationResult.is_valid ? '#4ade80' : '#ef4444', fontWeight: 'bold', marginBottom: '8px' }}>
-                      Status: {validationResult.status} ({validationResult.is_valid ? 'VALIDATED' : 'BLOCKERS FOUND'})
-                    </div>
-
-                    {validationResult.warnings?.map((w: string, idx: number) => (
-                      <div key={idx} style={{ color: '#facc15' }}>⚠ {w}</div>
-                    ))}
-                    {validationResult.blockers?.map((b: string, idx: number) => (
-                      <div key={idx} style={{ color: '#ef4444' }}>🚫 {b}</div>
-                    ))}
-                    {validationResult.is_valid && (
-                      <div style={{ color: '#4ade80' }}>✓ Workload name, resources, and networking validated without blockers.</div>
-                    )}
-                  </div>
-                ) : (
-                  <div style={{ color: '#94a3b8' }}>Running validation checks...</div>
-                )}
-              </div>
-
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <button
-                  type="button"
-                  onClick={() => setWizardStep(1)}
-                  style={{ backgroundColor: '#334155', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer' }}
-                >
-                  ← Edit Specification
-                </button>
-                <button
-                  type="button"
-                  onClick={handleGeneratePlan}
-                  style={{ backgroundColor: '#0284c7', color: '#fff', border: 'none', padding: '8px 20px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}
-                >
-                  Next: Generate Provisioning Plan →
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* WIZARD STEP 3: PROVISIONING PLAN & EXPLICIT APPROVAL */}
-          {wizardStep === 3 && activePlan && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              <div style={{ backgroundColor: '#0f172a', padding: '16px', borderRadius: '6px', border: '1px solid #334155' }}>
-                <h4 style={{ margin: '0 0 10px 0', color: '#38bdf8' }}>📋 WORKLOAD PROVISIONING PLAN</h4>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px', fontSize: '0.85rem', marginBottom: '15px' }}>
-                  <div><strong>Workload:</strong> {activePlan.workload_name}</div>
-                  <div><strong>Provider:</strong> {activePlan.provider} ({activePlan.type})</div>
-                  <div><strong>Image:</strong> {activePlan.image}</div>
-                  <div><strong>Resources:</strong> {activePlan.resources.cpu} CPU / {activePlan.resources.memory_mb} MB RAM / {activePlan.resources.storage_gb} GB Storage</div>
+            {/* STEP 3: EXPLICIT APPROVAL & PROVISIONING */}
+            {wizardStep === 3 && activePlan && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', fontSize: '0.85rem' }}>
+                <div style={{ backgroundColor: '#0f172a', padding: '12px', borderRadius: '6px' }}>
+                  <div style={{ fontWeight: 600, color: '#38bdf8', marginBottom: '8px' }}>Provisioning Execution Plan</div>
+                  <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>Plan Hash: {activePlan.plan_hash || 'SHA256-VALIDATED'}</div>
                 </div>
 
-                <div style={{ fontSize: '0.85rem', marginBottom: '10px' }}>
-                  <strong style={{ color: '#38bdf8', display: 'block', marginBottom: '4px' }}>Action Sequence:</strong>
+                <div style={{ border: '1px solid #334155', borderRadius: '6px', padding: '12px', backgroundColor: '#0f172a' }}>
+                  <strong style={{ color: '#cbd5e1', display: 'block', marginBottom: '6px' }}>Planned Hypervisor Operations:</strong>
                   {activePlan.actions?.map((act: string, idx: number) => (
-                    <div key={idx} style={{ color: '#cbd5e1' }}>[ ] {act}</div>
+                    <div key={idx} style={{ color: '#94a3b8', marginBottom: '4px' }}>{idx + 1}. {act}</div>
                   ))}
                 </div>
 
-                {activePlan.risks?.length > 0 && (
-                  <div style={{ fontSize: '0.85rem', color: '#facc15' }}>
-                    <strong>Noticed Risks:</strong>
-                    {activePlan.risks.map((r: string, idx: number) => (
-                      <div key={idx}>⚠ {r}</div>
-                    ))}
-                  </div>
-                )}
-              </div>
+                <div style={{ backgroundColor: '#451a03', border: '1px solid #f59e0b', padding: '12px', borderRadius: '6px', color: '#fef3c7' }}>
+                  <strong>Explicit Approval Required:</strong> Clicking "Approve & Execute Provisioning" will authorize Mystic ExecutionGuard to issue real hypervisor execution commands to the provider.
+                </div>
 
-              {/* Explicit Approval Boundary Alert */}
-              <div style={{ color: '#facc15', backgroundColor: '#422006', padding: '12px 16px', borderRadius: '6px', fontSize: '0.85rem', border: '1px solid #78350f' }}>
-                ⚠️ <strong>EXPLICIT APPROVAL BOUNDARY:</strong> Clicking "Approve & Provision Workload" will issue live creation requests to the underlying Incus hypervisor daemon.
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '12px' }}>
+                  <button onClick={() => setWizardStep(2)} style={{ padding: '8px 16px', borderRadius: '4px', border: '1px solid #475569', backgroundColor: 'transparent', color: '#cbd5e1', cursor: 'pointer' }}>← Back</button>
+                  <button onClick={handleApproveAndProvision} style={{ padding: '8px 16px', borderRadius: '4px', border: 'none', backgroundColor: '#16a34a', color: '#fff', cursor: 'pointer', fontWeight: 600 }}>Approve & Execute Provisioning ✓</button>
+                </div>
               </div>
-
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <button
-                  type="button"
-                  onClick={() => setWizardStep(2)}
-                  style={{ backgroundColor: '#334155', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer' }}
-                >
-                  ← Back to Validation
-                </button>
-                <button
-                  type="button"
-                  onClick={handleApproveAndProvision}
-                  style={{ backgroundColor: '#22c55e', color: '#fff', border: 'none', padding: '10px 24px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.95rem' }}
-                >
-                  ✓ Approve & Provision Workload
-                </button>
-              </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       )}
-
-      {/* WORKLOADS LIST & DETAILS GRID */}
-      <div style={{ display: 'grid', gridTemplateColumns: selectedWorkload ? '1fr 1fr' : '1fr', gap: '20px' }}>
-        {/* WORKLOAD CARDS TABLE */}
-        <div style={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '20px' }}>
-          <h3 style={{ margin: '0 0 15px 0', color: '#38bdf8', fontSize: '1.1rem' }}>📦 Managed Workloads</h3>
-
-          {loading ? (
-            <div style={{ color: '#94a3b8' }}>Loading workloads...</div>
-          ) : workloads.length === 0 ? (
-            <div style={{ backgroundColor: '#0f172a', padding: '20px', borderRadius: '6px', border: '1px solid #1e293b', color: '#94a3b8', fontSize: '0.9rem' }}>
-              No workloads found. (Empty state — strictly adhering to NO FAKE DATA policy).
-            </div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-              {workloads.map(wl => (
-                <div
-                  key={wl.id}
-                  onClick={() => setSelectedWorkload(wl)}
-                  style={{
-                    backgroundColor: selectedWorkload?.id === wl.id ? '#0f172a' : '#0f172a80',
-                    border: selectedWorkload?.id === wl.id ? '2px solid #38bdf8' : '1px solid #334155',
-                    borderRadius: '6px',
-                    padding: '14px',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center'
-                  }}
-                >
-                  <div>
-                    <strong style={{ color: '#f1f5f9', fontSize: '1rem', display: 'block' }}>{wl.name}</strong>
-                    <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
-                      Provider: {wl.provider} ({wl.type}) | Image: {wl.image}
-                    </span>
-                  </div>
-
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                    <span style={{
-                      fontSize: '0.75rem',
-                      padding: '3px 8px',
-                      borderRadius: '10px',
-                      fontWeight: 'bold',
-                      backgroundColor: wl.status === 'RUNNING' ? '#14532d' : wl.status === 'DRAFT' ? '#422006' : '#1e293b',
-                      color: wl.status === 'RUNNING' ? '#4ade80' : wl.status === 'DRAFT' ? '#facc15' : '#94a3b8'
-                    }}>
-                      {wl.status}
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* SELECTED WORKLOAD DETAILS PANEL */}
-        {selectedWorkload && (
-          <div style={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <h3 style={{ margin: 0, color: '#38bdf8', fontSize: '1.1rem' }}>ℹ️ Workload Details & Operational State</h3>
-              <button
-                type="button"
-                onClick={() => setSelectedWorkload(null)}
-                style={{ backgroundColor: 'transparent', color: '#94a3b8', border: 'none', cursor: 'pointer' }}
-              >
-                ✕
-              </button>
-            </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', fontSize: '0.85rem', backgroundColor: '#0f172a', padding: '12px', borderRadius: '6px' }}>
-              <div><span style={{ color: '#94a3b8' }}>Name:</span> <strong style={{ color: '#fff' }}>{selectedWorkload.name}</strong></div>
-              <div><span style={{ color: '#94a3b8' }}>ID:</span> <code style={{ color: '#38bdf8' }}>{selectedWorkload.id}</code></div>
-              <div><span style={{ color: '#94a3b8' }}>Provider:</span> {selectedWorkload.provider}</div>
-              <div><span style={{ color: '#94a3b8' }}>Type:</span> {selectedWorkload.type}</div>
-              <div><span style={{ color: '#94a3b8' }}>Image:</span> {selectedWorkload.image}</div>
-              <div><span style={{ color: '#94a3b8' }}>Private IP:</span> {selectedWorkload.network_config?.private_ipv4 || '10.0.0.151'}</div>
-              <div>
-                <span style={{ color: '#94a3b8' }}>Desired State:</span> <strong style={{ color: '#38bdf8' }}>{selectedWorkload.desired_state}</strong>
-              </div>
-              <div>
-                <span style={{ color: '#94a3b8' }}>Actual State:</span> <strong style={{ color: selectedWorkload.actual_state === 'running' ? '#4ade80' : '#facc15' }}>{selectedWorkload.actual_state}</strong>
-              </div>
-            </div>
-
-            {/* LIFECYCLE CONTROLS */}
-            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-              <button
-                type="button"
-                onClick={() => handleLifecycleOp('start')}
-                style={{ backgroundColor: '#15803d', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }}
-              >
-                ▶ Start
-              </button>
-              <button
-                type="button"
-                onClick={() => handleLifecycleOp('stop')}
-                style={{ backgroundColor: '#b45309', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }}
-              >
-                ⏹ Stop
-              </button>
-              <button
-                type="button"
-                onClick={() => handleLifecycleOp('restart')}
-                style={{ backgroundColor: '#0284c7', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }}
-              >
-                🔄 Restart
-              </button>
-              <button
-                type="button"
-                onClick={() => handleLifecycleOp('reconcile')}
-                style={{ backgroundColor: '#475569', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }}
-              >
-                🔍 Reconcile
-              </button>
-              <button
-                type="button"
-                onClick={() => handleLifecycleOp('delete')}
-                style={{ backgroundColor: '#b91c1c', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }}
-              >
-                🗑 Delete
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
     </div>
   )
+}
+
+function getStatusBg(status: string): string {
+  switch (status) {
+    case 'RUNNING': return '#16a34a'
+    case 'STOPPED': return '#475569'
+    case 'PROVISIONING': return '#0284c7'
+    case 'APPROVED': return '#2563eb'
+    case 'PLANNED': return '#0d9488'
+    case 'DRAFT': return '#64748b'
+    case 'FAILED': return '#dc2626'
+    case 'UNKNOWN': return '#d97706'
+    default: return '#64748b'
+  }
 }

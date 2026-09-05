@@ -45,3 +45,15 @@ func (cs CapabilitySet) List() []Capability {
 	}
 	return list
 }
+
+// Slice returns a slice of capability strings.
+func (cs CapabilitySet) Slice() []string {
+	list := make([]string, 0, len(cs))
+	for cap, supported := range cs {
+		if supported {
+			list = append(list, string(cap))
+		}
+	}
+	return list
+}
+
