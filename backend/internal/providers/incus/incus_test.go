@@ -363,3 +363,63 @@ func TestExtractPrimaryIP(t *testing.T) {
 		}
 	})
 }
+
+func TestIncusProviderAdoptInstance(t *testing.T) {
+	p := NewIncusProvider("")
+
+	executedCmds := make([]string, 0)
+	p.SetExecRunner(func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		cmdStr := strings.Join(args, " ")
+		executedCmds = append(executedCmds, cmdStr)
+
+		switch {
+		case strings.Contains(cmdStr, "version"):
+			return []byte("6.0.4"), nil
+		case strings.Contains(cmdStr, "list --format json"):
+			return []byte(`[
+				{
+					"name": "ext-01",
+					"status": "Running",
+					"type": "container",
+					"config": {},
+					"created_at": "2026-09-01T10:00:00Z"
+				}
+			]`), nil
+		case strings.Contains(cmdStr, "config set ext-01"):
+			return []byte(""), nil
+		default:
+			return []byte("{}"), nil
+		}
+	})
+
+	inst, err := p.AdoptInstance(context.Background(), "ext-01", "wl-9999")
+	if err != nil {
+		t.Fatalf("AdoptInstance failed: %v", err)
+	}
+
+	if inst.Name != "ext-01" {
+		t.Errorf("Expected instance name ext-01, got %s", inst.Name)
+	}
+
+	setOwnedCalled := false
+	setWlIDCalled := false
+	for _, cmd := range executedCmds {
+		if strings.Contains(cmd, "config set ext-01 user.mystic.owned true") {
+			setOwnedCalled = true
+		}
+		if strings.Contains(cmd, "config set ext-01 user.mystic.workload_id wl-9999") {
+			setWlIDCalled = true
+		}
+		if strings.HasPrefix(cmd, "delete") || strings.HasPrefix(cmd, "stop") ||
+			strings.HasPrefix(cmd, "start") || strings.HasPrefix(cmd, "restart") {
+			t.Errorf("Forbidden destructive command executed during adoption: %s", cmd)
+		}
+	}
+
+	if !setOwnedCalled {
+		t.Errorf("Expected config set user.mystic.owned true to be executed")
+	}
+	if !setWlIDCalled {
+		t.Errorf("Expected config set user.mystic.workload_id wl-9999 to be executed")
+	}
+}

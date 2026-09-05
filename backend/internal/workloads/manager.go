@@ -24,22 +24,44 @@ type Manager struct {
 	incusDriver interfaces.Provider
 	reconciler  *instances.Reconciler
 	guard       *ExecutionGuard
+	store       Store
 }
 
-// NewManager constructs a WorkloadManager with default Incus provider.
+// NewManager constructs a WorkloadManager with default Incus provider and default file store.
 func NewManager() *Manager {
-	return NewManagerWithProvider(incus.NewIncusProvider("/var/lib/incus/unix.socket"))
+	return NewManagerWithProviderAndStore(incus.NewIncusProvider("/var/lib/incus/unix.socket"), NewFileStore(""))
 }
 
 // NewManagerWithProvider constructs a WorkloadManager with a specific virtualization provider.
 func NewManagerWithProvider(provider interfaces.Provider) *Manager {
-	return &Manager{
+	return NewManagerWithProviderAndStore(provider, nil)
+}
+
+// NewManagerWithProviderAndStore constructs a WorkloadManager with provider and persistent store.
+func NewManagerWithProviderAndStore(provider interfaces.Provider, store Store) *Manager {
+	m := &Manager{
 		workloads:   make(map[string]*Workload),
 		plans:       make(map[string]*ProvisioningPlan),
 		allocator:   networking.NewAllocatorEngine(),
 		incusDriver: provider,
 		reconciler:  instances.NewReconciler(),
 		guard:       NewExecutionGuard(15 * time.Second),
+		store:       store,
+	}
+
+	if m.store != nil {
+		if loaded, err := m.store.Load(); err == nil && loaded != nil {
+			m.workloads = loaded
+		}
+	}
+
+	_ = m.ReconcileAll(context.Background())
+	return m
+}
+
+func (m *Manager) saveStoreUnlocked() {
+	if m.store != nil {
+		_ = m.store.Save(m.workloads)
 	}
 }
 
@@ -105,7 +127,251 @@ func (m *Manager) CreateWorkload(ctx context.Context, spec WorkloadSpec) (*Workl
 
 	w.PlanHash = ComputePlanHash(w)
 	m.workloads[id] = w
+	m.saveStoreUnlocked()
 	return w, nil
+}
+
+func (m *Manager) AdoptWorkload(ctx context.Context, name string) (*Workload, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("instance name for adoption cannot be empty")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Check if already managed in m.workloads
+	for _, existing := range m.workloads {
+		if existing.Name == name || existing.ProviderInstanceID == name {
+			return nil, fmt.Errorf("instance '%s' is already managed: %w", name, ErrAlreadyManaged)
+		}
+	}
+
+	instProvider, ok := m.incusDriver.InstanceProvider()
+	if !ok {
+		return nil, interfaces.ErrProviderUnavailable
+	}
+
+	inst, err := instProvider.GetInstance(ctx, name)
+	if err != nil {
+		if errors.Is(err, interfaces.ErrInstanceNotFound) {
+			return nil, fmt.Errorf("instance '%s' not found on provider: %w", name, ErrIncusInstanceNotFound)
+		}
+		return nil, fmt.Errorf("failed to query provider for instance '%s': %w", name, err)
+	}
+
+	// Check if instance is already tagged as mystic-owned
+	if inst.Labels != nil && (inst.Labels["user.mystic.owned"] == "true" || inst.Labels["mystic.owned"] == "true") {
+		return nil, fmt.Errorf("instance '%s' is already tagged as managed: %w", name, ErrAlreadyManaged)
+	}
+
+	id := fmt.Sprintf("wl-%d", time.Now().UnixNano())
+	now := time.Now().Format(time.RFC3339)
+
+	// Apply adoption metadata to real instance via provider (non-destructive)
+	if adopter, ok := m.incusDriver.(interfaces.InstanceAdopter); ok {
+		if _, err := adopter.AdoptInstance(ctx, name, id); err != nil {
+			return nil, fmt.Errorf("failed to apply adoption metadata to provider instance: %w", err)
+		}
+	}
+
+	wStatus := StatusStopped
+	if inst.State == interfaces.StateRunning {
+		wStatus = StatusRunning
+	} else if inst.State == interfaces.StateError {
+		wStatus = StatusFailed
+	}
+
+	wType := TypeIncusContainer
+	if inst.Type == interfaces.InstanceTypeVM {
+		wType = TypeIncusVM
+	}
+
+	cpuCores := inst.Limits.CPUCores
+	if cpuCores <= 0 {
+		cpuCores = 1
+	}
+
+	memMB := inst.Limits.MemoryBytes / (1024 * 1024)
+	if memMB <= 0 {
+		memMB = 512
+	}
+
+	imgName := "adopted-external"
+	if inst.Labels != nil && inst.Labels["image"] != "" {
+		imgName = inst.Labels["image"]
+	}
+
+	w := &Workload{
+		ID:                 id,
+		Name:               inst.Name,
+		HostID:             "host-local",
+		Provider:           m.incusDriver.Name(),
+		ProviderInstanceID: inst.Name,
+		Type:               wType,
+		Status:             wStatus,
+		DesiredState:       inst.State,
+		ActualState:        inst.State,
+		SyncStatus:         instances.SyncInSync,
+		CPU:                cpuCores,
+		MemoryMB:           memMB,
+		StorageGB:          10,
+		Image:              imgName,
+		Project:            "default",
+		Profile:            "default",
+		NetworkConfig: networking.WorkloadNetworkConfig{
+			ID:           id,
+			WorkloadID:   id,
+			WorkloadName: inst.Name,
+			HostID:       "host-local",
+			NetworkName:  "incusbr0",
+			PrivateIPv4:  inst.IPAddress,
+			ExposureMode: hosts.ExposurePrivateOnly,
+		},
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		LastProviderSync: now,
+	}
+
+	w.PlanHash = ComputePlanHash(w)
+	m.workloads[id] = w
+
+	m.saveStoreUnlocked()
+	m.guard.LogAudit(id, "ADOPT", m.incusDriver.Name(), inst.Name, w.PlanHash, string(w.Status), ResultSuccess, nil)
+
+	return w, nil
+}
+
+func (m *Manager) GetAdoptionPreview(ctx context.Context, name string) (*AdoptionPreview, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("instance name cannot be empty")
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	instProvider, ok := m.incusDriver.InstanceProvider()
+	if !ok {
+		return nil, interfaces.ErrProviderUnavailable
+	}
+
+	inst, err := instProvider.GetInstance(ctx, name)
+	if err != nil {
+		if errors.Is(err, interfaces.ErrInstanceNotFound) {
+			return nil, fmt.Errorf("instance '%s' not found on provider: %w", name, ErrIncusInstanceNotFound)
+		}
+		return nil, fmt.Errorf("failed to query provider for instance '%s': %w", name, err)
+	}
+
+	alreadyManaged := false
+	for _, existing := range m.workloads {
+		if existing.Name == name || existing.ProviderInstanceID == name {
+			alreadyManaged = true
+			break
+		}
+	}
+
+	if inst.Labels != nil && (inst.Labels["user.mystic.owned"] == "true" || inst.Labels["mystic.owned"] == "true") {
+		alreadyManaged = true
+	}
+
+	blockers := make([]string, 0)
+	warnings := make([]string, 0)
+
+	if alreadyManaged {
+		blockers = append(blockers, fmt.Sprintf("Instance '%s' is already managed by Mystic Hypervisor.", name))
+	}
+
+	cpuCores := inst.Limits.CPUCores
+	if cpuCores <= 0 {
+		cpuCores = 1
+	}
+
+	memBytes := inst.Limits.MemoryBytes
+	if memBytes <= 0 {
+		memBytes = 512 * 1024 * 1024
+	}
+
+	imgName := "adopted-external"
+	if inst.Labels != nil && inst.Labels["image"] != "" {
+		imgName = inst.Labels["image"]
+	}
+
+	ownership := interfaces.OwnershipExternal
+	if alreadyManaged {
+		ownership = interfaces.OwnershipMysticOwned
+	}
+
+	return &AdoptionPreview{
+		InstanceName:   inst.Name,
+		Provider:       m.incusDriver.Name(),
+		Type:           inst.Type,
+		State:          inst.State,
+		IPAddress:      inst.IPAddress,
+		CPUCores:       cpuCores,
+		MemoryBytes:    memBytes,
+		StorageGB:      10,
+		Image:          imgName,
+		Network:        "incusbr0",
+		Ownership:      ownership,
+		AlreadyManaged: alreadyManaged,
+		CanAdopt:       !alreadyManaged && len(blockers) == 0,
+		Blockers:       blockers,
+		Warnings:       warnings,
+	}, nil
+}
+
+func (m *Manager) ReconcileAll(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	instProvider, ok := m.incusDriver.InstanceProvider()
+	if !ok {
+		return nil
+	}
+
+	liveInsts, err := instProvider.ListInstances(ctx)
+	liveMap := make(map[string]*interfaces.Instance)
+	if err == nil {
+		for i := range liveInsts {
+			liveMap[liveInsts[i].Name] = &liveInsts[i]
+		}
+	}
+
+	for _, w := range m.workloads {
+		if w.Status == StatusDraft {
+			continue
+		}
+
+		targetName := w.ProviderInstanceID
+		if targetName == "" {
+			targetName = w.Name
+		}
+
+		liveInst, exists := liveMap[targetName]
+		if exists {
+			w.ActualState = liveInst.State
+			if liveInst.IPAddress != "" {
+				w.NetworkConfig.PrivateIPv4 = liveInst.IPAddress
+			}
+			if liveInst.State == interfaces.StateRunning {
+				w.Status = StatusRunning
+			} else if liveInst.State == interfaces.StateStopped {
+				w.Status = StatusStopped
+			}
+			w.SyncStatus = instances.SyncInSync
+			w.LastProviderSync = time.Now().Format(time.RFC3339)
+		} else {
+			w.ActualState = interfaces.StateUnknown
+			w.Status = StatusOrphaned
+			w.SyncStatus = instances.SyncProviderMissing
+			w.LastProviderSync = time.Now().Format(time.RFC3339)
+		}
+	}
+
+	m.saveStoreUnlocked()
+	return nil
 }
 
 func (m *Manager) ValidateWorkload(ctx context.Context, id string) (*networking.ValidationResult, error) {
@@ -244,6 +510,7 @@ func (m *Manager) ApprovePlan(ctx context.Context, id string) error {
 	plan.Approved = true
 	w.Status = StatusApproved
 	w.UpdatedAt = time.Now().Format(time.RFC3339)
+	m.saveStoreUnlocked()
 	return nil
 }
 
@@ -355,12 +622,12 @@ func (m *Manager) ProvisionWorkload(ctx context.Context, id string) (*Workload, 
 			MemoryBytes: w.MemoryMB * 1024 * 1024,
 		},
 		Labels: map[string]string{
-			"image":                 w.Image,
+			"image":                   w.Image,
 			"user.mystic.owned":       "true",
 			"user.mystic.workload_id": w.ID,
 			"user.mystic.host_id":     w.HostID,
-			"mystic.owned":          "true",
-			"mystic.workload_id":    w.ID,
+			"mystic.owned":            "true",
+			"mystic.workload_id":      w.ID,
 		},
 	}
 	if w.Type == TypeIncusVM || w.Type == TypeKVMVM {
@@ -406,6 +673,7 @@ func (m *Manager) ProvisionWorkload(ctx context.Context, id string) (*Workload, 
 	w.Status = StatusRunning
 	w.LastProviderSync = time.Now().Format(time.RFC3339)
 	w.UpdatedAt = time.Now().Format(time.RFC3339)
+	m.saveStoreUnlocked()
 	m.mu.Unlock()
 
 	m.guard.RecordOperation(opKey, w.ID, "PROVISION", plan.PlanHash, ResultSuccess)
@@ -552,6 +820,7 @@ func (m *Manager) DeleteWorkload(ctx context.Context, id string) error {
 	m.mu.Lock()
 	delete(m.workloads, id)
 	delete(m.plans, id)
+	m.saveStoreUnlocked()
 	m.mu.Unlock()
 
 	m.guard.LogAudit(w.ID, "DELETE", provider.Name(), w.Name, w.PlanHash, "DELETED", ResultSuccess, nil)
@@ -602,6 +871,7 @@ func (m *Manager) ReconcileWorkload(ctx context.Context, id string) (*Workload, 
 			w.ErrorDetails = "Provider confirmed resource does not exist after ambiguous operation"
 		}
 		w.LastProviderSync = time.Now().Format(time.RFC3339)
+		m.saveStoreUnlocked()
 		return w, nil
 	}
 
@@ -619,12 +889,15 @@ func (m *Manager) ReconcileWorkload(ctx context.Context, id string) (*Workload, 
 
 	if reconciled.SyncStatus == instances.SyncOutOfSync {
 		w.Status = StatusDrifted
+	} else if reconciled.SyncStatus == instances.SyncProviderMissing {
+		w.Status = StatusOrphaned
 	} else if reconciled.AuthoritativeState == interfaces.StateRunning {
 		w.Status = StatusRunning
 	} else if reconciled.AuthoritativeState == interfaces.StateStopped {
 		w.Status = StatusStopped
 	}
 
+	m.saveStoreUnlocked()
 	return w, nil
 }
 
@@ -651,20 +924,21 @@ func (m *Manager) ListWorkloads(ctx context.Context) ([]Workload, error) {
 }
 
 func (m *Manager) GetProviderPreflight(ctx context.Context, providerName string) (*interfaces.ProviderPreflightResult, error) {
-	if providerName == "" {
-		providerName = "incus"
+	p := m.incusDriver
+	if p == nil || (providerName != "" && p.Name() != providerName) {
+		if registered, err := interfaces.GetProvider(providerName); err == nil {
+			p = registered
+		}
 	}
 
-	p, err := interfaces.GetProvider(providerName)
-	if err != nil {
-		p = m.incusDriver
-	}
-
+	var res *interfaces.ProviderPreflightResult
 	if checker, ok := p.(interfaces.ProviderPreflightChecker); ok {
-		return checker.Preflight(ctx)
-	}
-
-	if pingErr := p.Ping(ctx); pingErr != nil {
+		var pfErr error
+		res, pfErr = checker.Preflight(ctx)
+		if pfErr != nil {
+			return nil, pfErr
+		}
+	} else if pingErr := p.Ping(ctx); pingErr != nil {
 		return &interfaces.ProviderPreflightResult{
 			Provider:     providerName,
 			Availability: interfaces.AvailabilityUnavailable,
@@ -677,19 +951,44 @@ func (m *Manager) GetProviderPreflight(ctx context.Context, providerName string)
 			Capabilities: p.Capabilities().Slice(),
 			Blockers:     []string{fmt.Sprintf("Provider '%s' unavailable: %v", providerName, pingErr)},
 		}, nil
+	} else {
+		res = &interfaces.ProviderPreflightResult{
+			Provider:     providerName,
+			Availability: interfaces.AvailabilityAvailable,
+			HealthStatus: interfaces.ProviderHealthStatus{
+				Installed:   true,
+				Reachable:   true,
+				Operational: true,
+				Capable:     true,
+			},
+			Capabilities: p.Capabilities().Slice(),
+		}
 	}
 
-	return &interfaces.ProviderPreflightResult{
-		Provider:     providerName,
-		Availability: interfaces.AvailabilityAvailable,
-		HealthStatus: interfaces.ProviderHealthStatus{
-			Installed:   true,
-			Reachable:   true,
-			Operational: true,
-			Capable:     true,
-		},
-		Capabilities: p.Capabilities().Slice(),
-	}, nil
+	if res != nil && len(res.ExistingInstances) > 0 {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+
+		for i := range res.ExistingInstances {
+			inst := &res.ExistingInstances[i]
+			hasWorkload := false
+			for _, w := range m.workloads {
+				if w.Name == inst.Name || w.ProviderInstanceID == inst.Name {
+					hasWorkload = true
+					break
+				}
+			}
+
+			if inst.Ownership == interfaces.OwnershipMysticOwned {
+				if !hasWorkload {
+					inst.Ownership = interfaces.OwnershipUnknown
+					res.Warnings = append(res.Warnings, fmt.Sprintf("Instance '%s' has Mystic ownership metadata but is missing from Mystic persistent database.", inst.Name))
+				}
+			} else if hasWorkload {
+				inst.Ownership = interfaces.OwnershipMysticOwned
+			}
+		}
+	}
+
+	return res, nil
 }
-
-

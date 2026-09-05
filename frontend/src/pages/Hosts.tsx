@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react'
 import { ProviderPreflightResult } from '../types'
+import { AdoptionModal } from '../components/AdoptionModal'
 
 export const Hosts: React.FC = () => {
   const [preflight, setPreflight] = useState<ProviderPreflightResult | null>(null)
   const [loading, setLoading] = useState(true)
+  const [adoptTargetName, setAdoptTargetName] = useState<string | null>(null)
 
   useEffect(() => {
     fetchPreflight()
@@ -159,6 +161,79 @@ export const Hosts: React.FC = () => {
               </div>
             </div>
 
+            {/* Discovered Incus Instances Table */}
+            {preflight.existing_instances && preflight.existing_instances.length > 0 && (
+              <div style={{ marginTop: '8px' }}>
+                <h4 style={{ margin: '0 0 10px 0', fontSize: '0.95rem', color: '#e2e8f0' }}>
+                  Discovered Incus Instances on Host
+                </h4>
+                <div style={{ backgroundColor: '#0f172a', borderRadius: '6px', border: '1px solid #334155', overflow: 'hidden' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.85rem' }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid #334155', color: '#94a3b8' }}>
+                        <th style={{ padding: '10px 14px' }}>Instance Name</th>
+                        <th style={{ padding: '10px 14px' }}>Type</th>
+                        <th style={{ padding: '10px 14px' }}>Live State</th>
+                        <th style={{ padding: '10px 14px' }}>Discovered IP</th>
+                        <th style={{ padding: '10px 14px' }}>Ownership</th>
+                        <th style={{ padding: '10px 14px' }}>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {preflight.existing_instances.map(inst => (
+                        <tr key={inst.name} style={{ borderBottom: '1px solid #1e293b' }}>
+                          <td style={{ padding: '10px 14px', fontWeight: 600, color: '#f8fafc' }}>{inst.name}</td>
+                          <td style={{ padding: '10px 14px', color: '#cbd5e1' }}>{inst.type}</td>
+                          <td style={{ padding: '10px 14px' }}>
+                            <span style={{ color: inst.state === 'Running' || inst.state === 'running' ? '#4ade80' : '#f87171', fontWeight: 600 }}>
+                              {inst.state}
+                            </span>
+                          </td>
+                          <td style={{ padding: '10px 14px', color: '#cbd5e1' }}>{inst.ip_address || 'Unassigned'}</td>
+                          <td style={{ padding: '10px 14px' }}>
+                            <span
+                              style={{
+                                padding: '2px 8px',
+                                borderRadius: '4px',
+                                fontSize: '0.75rem',
+                                fontWeight: 600,
+                                backgroundColor: inst.ownership === 'MYSTIC_OWNED' ? '#064e3b' : inst.ownership === 'EXTERNAL' ? '#451a03' : '#334155',
+                                color: inst.ownership === 'MYSTIC_OWNED' ? '#34d399' : inst.ownership === 'EXTERNAL' ? '#fbbf24' : '#94a3b8',
+                                border: `1px solid ${inst.ownership === 'MYSTIC_OWNED' ? '#10b981' : inst.ownership === 'EXTERNAL' ? '#f59e0b' : '#64748b'}`
+                              }}
+                            >
+                              {inst.ownership === 'MYSTIC_OWNED' ? 'MANAGED' : inst.ownership}
+                            </span>
+                          </td>
+                          <td style={{ padding: '10px 14px' }}>
+                            {inst.ownership === 'EXTERNAL' ? (
+                              <button
+                                onClick={() => setAdoptTargetName(inst.name)}
+                                style={{
+                                  backgroundColor: '#0284c7',
+                                  color: '#fff',
+                                  border: 'none',
+                                  padding: '4px 12px',
+                                  borderRadius: '4px',
+                                  cursor: 'pointer',
+                                  fontWeight: 600,
+                                  fontSize: '0.8rem'
+                                }}
+                              >
+                                Adopt
+                              </button>
+                            ) : (
+                              <span style={{ color: '#64748b', fontSize: '0.8rem' }}>Managed</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
             {/* Blockers / Warnings */}
             {preflight.blockers && preflight.blockers.length > 0 && (
               <div style={{ backgroundColor: '#450a0a', padding: '12px', borderRadius: '6px', border: '1px solid #ef4444' }}>
@@ -173,6 +248,17 @@ export const Hosts: React.FC = () => {
           <div style={{ color: '#94a3b8' }}>Incus preflight discovery data unavailable.</div>
         )}
       </div>
+
+      {/* Adoption Modal */}
+      {adoptTargetName && (
+        <AdoptionModal
+          instanceName={adoptTargetName}
+          onClose={() => setAdoptTargetName(null)}
+          onSuccess={() => {
+            fetchPreflight()
+          }}
+        />
+      )}
     </div>
   )
 }

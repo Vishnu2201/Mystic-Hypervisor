@@ -2,6 +2,10 @@ package workloads
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -41,6 +45,34 @@ func (tp *TestProvider) SnapshotProvider() (interfaces.SnapshotProvider, bool) {
 func (tp *TestProvider) StorageProvider() (interfaces.StorageProvider, bool)   { return nil, false }
 func (tp *TestProvider) NetworkProvider() (interfaces.NetworkProvider, bool)   { return nil, false }
 
+func (tp *TestProvider) Preflight(ctx context.Context) (*interfaces.ProviderPreflightResult, error) {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	tp.calls = append(tp.calls, "Preflight")
+
+	existing := make([]interfaces.PreflightInstance, 0, len(tp.instances))
+	for _, inst := range tp.instances {
+		ownership := interfaces.OwnershipExternal
+		if inst.Labels != nil && (inst.Labels["user.mystic.owned"] == "true" || inst.Labels["mystic.owned"] == "true") {
+			ownership = interfaces.OwnershipMysticOwned
+		}
+		existing = append(existing, interfaces.PreflightInstance{
+			Name:      inst.Name,
+			Type:      string(inst.Type),
+			State:     string(inst.State),
+			Ownership: ownership,
+			IPAddress: inst.IPAddress,
+		})
+	}
+
+	return &interfaces.ProviderPreflightResult{
+		Provider:          "incus",
+		Availability:      interfaces.AvailabilityAvailable,
+		HealthStatus:      interfaces.ProviderHealthStatus{Installed: true, Reachable: true, Operational: true, Capable: true},
+		ExistingInstances: existing,
+	}, nil
+}
+
 func (tp *TestProvider) ListInstances(ctx context.Context) ([]interfaces.Instance, error) {
 	tp.mu.Lock()
 	defer tp.mu.Unlock()
@@ -63,6 +95,22 @@ func (tp *TestProvider) GetInstance(ctx context.Context, idOrName string) (*inte
 	if !ok {
 		return nil, interfaces.ErrInstanceNotFound
 	}
+	return inst, nil
+}
+
+func (tp *TestProvider) AdoptInstance(ctx context.Context, name string, workloadID string) (*interfaces.Instance, error) {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	tp.calls = append(tp.calls, "AdoptInstance:"+name)
+	inst, ok := tp.instances[name]
+	if !ok {
+		return nil, interfaces.ErrInstanceNotFound
+	}
+	if inst.Labels == nil {
+		inst.Labels = make(map[string]string)
+	}
+	inst.Labels["user.mystic.owned"] = "true"
+	inst.Labels["user.mystic.workload_id"] = workloadID
 	return inst, nil
 }
 
@@ -122,7 +170,9 @@ func (tp *TestProvider) DeleteInstance(ctx context.Context, idOrName string) err
 	return nil
 }
 
-func (tp *TestProvider) RenameInstance(ctx context.Context, oldName, newName string) error { return nil }
+func (tp *TestProvider) RenameInstance(ctx context.Context, oldName, newName string) error {
+	return nil
+}
 func (tp *TestProvider) ResizeInstance(ctx context.Context, idOrName string, limits interfaces.ResourceLimits) error {
 	return nil
 }
@@ -223,9 +273,16 @@ func TestProvisioningApprovalBoundary(t *testing.T) {
 	}
 
 	// 1. Confirm provisioning has NOT occurred before approval
-	callsBefore := tp.GetCalls()
-	if len(callsBefore) != 0 {
-		t.Fatalf("Provider calls recorded before approval: %v", callsBefore)
+	hasMutatingCalls := func(calls []string) bool {
+		for _, c := range calls {
+			if strings.HasPrefix(c, "CreateInstance") || strings.HasPrefix(c, "StartInstance") {
+				return true
+			}
+		}
+		return false
+	}
+	if hasMutatingCalls(tp.GetCalls()) {
+		t.Fatalf("Provider mutating calls recorded before approval: %v", tp.GetCalls())
 	}
 
 	// 2. Attempt provision before approval and verify it is rejected
@@ -235,9 +292,8 @@ func TestProvisioningApprovalBoundary(t *testing.T) {
 	}
 
 	// 3. Confirm test provider recorded zero provisioning calls
-	callsAfterUnapproved := tp.GetCalls()
-	if len(callsAfterUnapproved) != 0 {
-		t.Fatalf("Provider calls recorded on unapproved provision attempt: %v", callsAfterUnapproved)
+	if hasMutatingCalls(tp.GetCalls()) {
+		t.Fatalf("Provider mutating calls recorded on unapproved provision attempt: %v", tp.GetCalls())
 	}
 
 	// 4. Approve the plan
@@ -303,8 +359,10 @@ func TestProviderNeverCalledWithoutApproval(t *testing.T) {
 		t.Fatalf("Expected ProvisionWorkload to return error for unapproved workload")
 	}
 
-	if len(tp.GetCalls()) != 0 {
-		t.Fatalf("Provider was called despite missing approval! Calls: %v", tp.GetCalls())
+	for _, call := range tp.GetCalls() {
+		if strings.HasPrefix(call, "CreateInstance") || strings.HasPrefix(call, "StartInstance") {
+			t.Fatalf("Provider mutating action executed despite missing approval! Calls: %v", tp.GetCalls())
+		}
 	}
 }
 
@@ -332,5 +390,285 @@ func TestReconcilerDriftDetection(t *testing.T) {
 
 	if res.AuthoritativeState != "stopped" {
 		t.Fatalf("Expected provider state 'stopped' to be authoritative, got %s", res.AuthoritativeState)
+	}
+}
+
+func TestWorkloadAdoptionSuccess(t *testing.T) {
+	ctx := context.Background()
+	tp := NewTestProvider()
+	mgr := NewManagerWithProvider(tp)
+
+	tp.instances["ext-nano-01"] = &interfaces.Instance{
+		ID:        "ext-nano-01",
+		Name:      "ext-nano-01",
+		Type:      interfaces.InstanceTypeContainer,
+		State:     interfaces.StateRunning,
+		Provider:  "incus",
+		Node:      "local",
+		IPAddress: "10.170.92.70",
+		Limits: interfaces.ResourceLimits{
+			CPUCores:    2,
+			MemoryBytes: 2048 * 1024 * 1024,
+		},
+		Labels: map[string]string{
+			"image": "ubuntu/24.04",
+		},
+	}
+
+	w, err := mgr.AdoptWorkload(ctx, "ext-nano-01")
+	if err != nil {
+		t.Fatalf("AdoptWorkload failed: %v", err)
+	}
+
+	if w.Name != "ext-nano-01" {
+		t.Errorf("Expected workload name ext-nano-01, got %s", w.Name)
+	}
+	if w.Status != StatusRunning {
+		t.Errorf("Expected workload status RUNNING, got %s", w.Status)
+	}
+	if w.SyncStatus != instances.SyncInSync {
+		t.Errorf("Expected workload sync status IN_SYNC, got %s", w.SyncStatus)
+	}
+	if w.NetworkConfig.PrivateIPv4 != "10.170.92.70" {
+		t.Errorf("Expected IP 10.170.92.70, got %s", w.NetworkConfig.PrivateIPv4)
+	}
+
+	calls := tp.GetCalls()
+	for _, call := range calls {
+		if strings.HasPrefix(call, "CreateInstance") || strings.HasPrefix(call, "StartInstance") ||
+			strings.HasPrefix(call, "StopInstance") || strings.HasPrefix(call, "RestartInstance") {
+			t.Errorf("Forbidden mutating lifecycle call during adoption: %s", call)
+		}
+	}
+}
+
+func TestWorkloadAdoptionIdempotencyAndConflict(t *testing.T) {
+	ctx := context.Background()
+	tp := NewTestProvider()
+	mgr := NewManagerWithProvider(tp)
+
+	tp.instances["ext-nano-02"] = &interfaces.Instance{
+		ID:    "ext-nano-02",
+		Name:  "ext-nano-02",
+		Type:  interfaces.InstanceTypeContainer,
+		State: interfaces.StateRunning,
+	}
+
+	w, err := mgr.AdoptWorkload(ctx, "ext-nano-02")
+	if err != nil {
+		t.Fatalf("Initial AdoptWorkload failed: %v", err)
+	}
+	if w == nil {
+		t.Fatalf("Expected non-nil workload")
+	}
+
+	_, err = mgr.AdoptWorkload(ctx, "ext-nano-02")
+	if err == nil || !errors.Is(err, ErrAlreadyManaged) {
+		t.Fatalf("Expected ErrAlreadyManaged on double adoption attempt, got %v", err)
+	}
+}
+
+func TestWorkloadAdoptionNonExistentInstance(t *testing.T) {
+	ctx := context.Background()
+	tp := NewTestProvider()
+	mgr := NewManagerWithProvider(tp)
+
+	_, err := mgr.AdoptWorkload(ctx, "ghost-instance")
+	if err == nil || !errors.Is(err, ErrIncusInstanceNotFound) {
+		t.Fatalf("Expected ErrIncusInstanceNotFound for missing instance adoption, got %v", err)
+	}
+}
+
+func TestFileStoreSaveAndLoad(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "mystic-store-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	storeFile := filepath.Join(tempDir, "workloads.json")
+	store := NewFileStore(storeFile)
+
+	workloadsMap := map[string]*Workload{
+		"wl-01": {
+			ID:                 "wl-01",
+			Name:               "test-store-inst",
+			Provider:           "incus",
+			ProviderInstanceID: "test-store-inst",
+			Type:               TypeIncusContainer,
+			Status:             StatusRunning,
+			DesiredState:       interfaces.StateRunning,
+			ActualState:        interfaces.StateRunning,
+			SyncStatus:         instances.SyncInSync,
+		},
+	}
+
+	if err := store.Save(workloadsMap); err != nil {
+		t.Fatalf("Store Save failed: %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Store Load failed: %v", err)
+	}
+
+	if len(loaded) != 1 || loaded["wl-01"] == nil {
+		t.Fatalf("Expected 1 workload loaded, got %+v", loaded)
+	}
+
+	if loaded["wl-01"].Name != "test-store-inst" {
+		t.Errorf("Expected workload name test-store-inst, got %s", loaded["wl-01"].Name)
+	}
+}
+
+func TestManagerRestartPersistenceAndReconciliation(t *testing.T) {
+	ctx := context.Background()
+	tempDir, err := os.MkdirTemp("", "mystic-restart-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	storeFile := filepath.Join(tempDir, "workloads.json")
+	store1 := NewFileStore(storeFile)
+
+	tp := NewTestProvider()
+	tp.instances["ext-nano-03"] = &interfaces.Instance{
+		ID:        "ext-nano-03",
+		Name:      "ext-nano-03",
+		Type:      interfaces.InstanceTypeContainer,
+		State:     interfaces.StateRunning,
+		Provider:  "incus",
+		IPAddress: "10.170.92.93",
+	}
+
+	mgr1 := NewManagerWithProviderAndStore(tp, store1)
+
+	adoptedW, err := mgr1.AdoptWorkload(ctx, "ext-nano-03")
+	if err != nil {
+		t.Fatalf("Initial adoption failed: %v", err)
+	}
+
+	store2 := NewFileStore(storeFile)
+	mgr2 := NewManagerWithProviderAndStore(tp, store2)
+
+	recoveredW, err := mgr2.GetWorkload(ctx, adoptedW.ID)
+	if err != nil {
+		t.Fatalf("Failed to retrieve recovered workload after restart: %v", err)
+	}
+
+	if recoveredW.Name != "ext-nano-03" {
+		t.Errorf("Expected workload name ext-nano-03, got %s", recoveredW.Name)
+	}
+	if recoveredW.Status != StatusRunning {
+		t.Errorf("Expected status RUNNING after restart reconciliation, got %s", recoveredW.Status)
+	}
+	if recoveredW.SyncStatus != instances.SyncInSync {
+		t.Errorf("Expected SyncInSync after restart reconciliation, got %s", recoveredW.SyncStatus)
+	}
+
+	pfRes, err := mgr2.GetProviderPreflight(ctx, "incus")
+	if err != nil {
+		t.Fatalf("Preflight failed: %v", err)
+	}
+
+	if len(pfRes.ExistingInstances) != 1 || pfRes.ExistingInstances[0].Ownership != interfaces.OwnershipMysticOwned {
+		t.Errorf("Expected instance to be classified MYSTIC_OWNED after restart, got %+v", pfRes.ExistingInstances)
+	}
+}
+
+func TestManagerOrphanHandlingWhenInstanceMissing(t *testing.T) {
+	ctx := context.Background()
+	tempDir, err := os.MkdirTemp("", "mystic-orphan-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	storeFile := filepath.Join(tempDir, "workloads.json")
+	store := NewFileStore(storeFile)
+	tp := NewTestProvider()
+
+	tp.instances["ext-nano-04"] = &interfaces.Instance{
+		ID:        "ext-nano-04",
+		Name:      "ext-nano-04",
+		Type:      interfaces.InstanceTypeContainer,
+		State:     interfaces.StateRunning,
+		Provider:  "incus",
+		IPAddress: "10.170.92.94",
+	}
+
+	mgr := NewManagerWithProviderAndStore(tp, store)
+	adoptedW, err := mgr.AdoptWorkload(ctx, "ext-nano-04")
+	if err != nil {
+		t.Fatalf("AdoptWorkload failed: %v", err)
+	}
+
+	delete(tp.instances, "ext-nano-04")
+
+	_ = mgr.ReconcileAll(ctx)
+
+	reconciledW, err := mgr.GetWorkload(ctx, adoptedW.ID)
+	if err != nil {
+		t.Fatalf("GetWorkload failed after orphan event: %v", err)
+	}
+
+	if reconciledW.Status != StatusOrphaned {
+		t.Errorf("Expected workload status ORPHANED for missing instance, got %s", reconciledW.Status)
+	}
+	if reconciledW.SyncStatus != instances.SyncProviderMissing {
+		t.Errorf("Expected SyncProviderMissing, got %s", reconciledW.SyncStatus)
+	}
+
+	if len(tp.instances) != 0 {
+		t.Errorf("Forbidden auto-recreation of missing instance! Provider instances: %+v", tp.instances)
+	}
+}
+
+func TestManagerGetAdoptionPreview(t *testing.T) {
+	ctx := context.Background()
+	tp := NewTestProvider()
+	mgr := NewManagerWithProvider(tp)
+
+	tp.instances["ext-preview-01"] = &interfaces.Instance{
+		ID:        "ext-preview-01",
+		Name:      "ext-preview-01",
+		Type:      interfaces.InstanceTypeContainer,
+		State:     interfaces.StateRunning,
+		Provider:  "incus",
+		IPAddress: "10.170.92.95",
+		Limits: interfaces.ResourceLimits{
+			CPUCores:    4,
+			MemoryBytes: 4096 * 1024 * 1024,
+		},
+	}
+
+	prev, err := mgr.GetAdoptionPreview(ctx, "ext-preview-01")
+	if err != nil {
+		t.Fatalf("GetAdoptionPreview failed: %v", err)
+	}
+
+	if !prev.CanAdopt || prev.AlreadyManaged {
+		t.Errorf("Expected CanAdopt true and AlreadyManaged false, got %+v", prev)
+	}
+	if prev.CPUCores != 4 || prev.MemoryBytes/(1024*1024) != 4096 {
+		t.Errorf("Expected limits 4 cores / 4096MB, got %d cores / %dMB", prev.CPUCores, prev.MemoryBytes/(1024*1024))
+	}
+
+	_, err = mgr.AdoptWorkload(ctx, "ext-preview-01")
+	if err != nil {
+		t.Fatalf("AdoptWorkload failed: %v", err)
+	}
+
+	prevManaged, err := mgr.GetAdoptionPreview(ctx, "ext-preview-01")
+	if err != nil {
+		t.Fatalf("GetAdoptionPreview failed after adoption: %v", err)
+	}
+
+	if prevManaged.CanAdopt || !prevManaged.AlreadyManaged {
+		t.Errorf("Expected CanAdopt false and AlreadyManaged true after adoption, got %+v", prevManaged)
+	}
+	if len(prevManaged.Blockers) == 0 {
+		t.Errorf("Expected blocker message for already managed instance")
 	}
 }

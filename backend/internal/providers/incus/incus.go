@@ -523,6 +523,37 @@ func (p *IncusProvider) GetInstanceMetrics(ctx context.Context, idOrName string)
 	}, nil
 }
 
+func (p *IncusProvider) AdoptInstance(ctx context.Context, name string, workloadID string) (*interfaces.Instance, error) {
+	if err := p.Ping(ctx); err != nil {
+		return nil, interfaces.ErrProviderUnavailable
+	}
+	inst, err := p.GetInstance(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+
+	if inst.Labels != nil && (inst.Labels["user.mystic.owned"] == "true" || inst.Labels["mystic.owned"] == "true") {
+		existingWL := inst.Labels["user.mystic.workload_id"]
+		if existingWL == "" {
+			existingWL = inst.Labels["mystic.workload_id"]
+		}
+		if existingWL == workloadID && workloadID != "" {
+			return inst, nil
+		}
+	}
+
+	if _, err := p.runCmd(ctx, "incus", "config", "set", name, "user.mystic.owned", "true"); err != nil {
+		return nil, fmt.Errorf("failed to set ownership label on incus instance %s: %w", name, err)
+	}
+	if workloadID != "" {
+		if _, err := p.runCmd(ctx, "incus", "config", "set", name, "user.mystic.workload_id", workloadID); err != nil {
+			return nil, fmt.Errorf("failed to set workload_id label on incus instance %s: %w", name, err)
+		}
+	}
+
+	return p.GetInstance(ctx, name)
+}
+
 // --- ImageProvider Implementation ---
 
 func (p *IncusProvider) ListImages(ctx context.Context) ([]interfaces.Image, error) {

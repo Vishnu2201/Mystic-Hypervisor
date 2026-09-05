@@ -34,6 +34,11 @@ type InstanceProvider interface {
 	GetInstanceMetrics(ctx context.Context, idOrName string) (*InstanceMetrics, error)
 }
 
+// InstanceAdopter is an optional interface implemented by virtualization providers that support tagging and adopting external instances.
+type InstanceAdopter interface {
+	AdoptInstance(ctx context.Context, name string, workloadID string) (*Instance, error)
+}
+
 // ImageProvider abstracts OS image handling.
 type ImageProvider interface {
 	ListImages(ctx context.Context) ([]Image, error)

@@ -58,11 +58,14 @@ func (r *Router) registerRoutes() {
 	r.mux.HandleFunc("GET /api/v1/providers/preflight", r.handleIncusPreflight)
 	r.mux.HandleFunc("GET /api/v1/providers/incus/images", r.handleIncusImages)
 	r.mux.HandleFunc("GET /api/v1/providers/incus/resources", r.handleIncusResources)
+	r.mux.HandleFunc("GET /api/v1/providers/incus/instances/{name}/adoption-preview", r.handleIncusAdoptionPreview)
+	r.mux.HandleFunc("POST /api/v1/providers/incus/instances/{name}/adopt", r.handleAdoptIncusInstance)
 	r.mux.HandleFunc("GET /api/v1/instances", r.handleInstances)
 
 	// Workload Lifecycle & Provisioning Endpoints
 	r.mux.HandleFunc("GET /api/v1/workloads", r.handleListWorkloads)
 	r.mux.HandleFunc("POST /api/v1/workloads", r.handleCreateWorkload)
+	r.mux.HandleFunc("POST /api/v1/workloads/adopt", r.handleAdoptWorkload)
 	r.mux.HandleFunc("GET /api/v1/workloads/{id}", r.handleGetWorkload)
 	r.mux.HandleFunc("POST /api/v1/workloads/{id}/validate", r.handleValidateWorkload)
 	r.mux.HandleFunc("POST /api/v1/workloads/{id}/plan", r.handlePlanWorkload)
@@ -357,8 +360,94 @@ func (r *Router) handleReconcileWorkload(w http.ResponseWriter, req *http.Reques
 	})
 }
 
+func (r *Router) handleIncusAdoptionPreview(w http.ResponseWriter, req *http.Request) {
+	path := req.URL.Path
+	trimmed := strings.TrimPrefix(path, "/api/v1/providers/incus/instances/")
+	name := strings.TrimSuffix(trimmed, "/adoption-preview")
+	name = strings.Trim(name, "/")
+
+	if name == "" {
+		name = req.URL.Query().Get("name")
+	}
+
+	if strings.TrimSpace(name) == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "instance name is required for preview"})
+		return
+	}
+
+	preview, err := r.workloadManager.GetAdoptionPreview(req.Context(), name)
+	if err != nil {
+		writeWorkloadError(w, err)
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, preview)
+}
+
+func (r *Router) handleAdoptIncusInstance(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	path := req.URL.Path
+	trimmed := strings.TrimPrefix(path, "/api/v1/providers/incus/instances/")
+	name := strings.TrimSuffix(trimmed, "/adopt")
+	name = strings.Trim(name, "/")
+
+	if name == "" {
+		var body struct {
+			Name string `json:"name"`
+		}
+		_ = json.NewDecoder(req.Body).Decode(&body)
+		name = body.Name
+	}
+
+	if strings.TrimSpace(name) == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "instance name is required for adoption"})
+		return
+	}
+
+	wl, err := r.workloadManager.AdoptWorkload(req.Context(), name)
+	if err != nil {
+		writeWorkloadError(w, err)
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"workload": wl,
+		"message":  fmt.Sprintf("External instance '%s' successfully adopted into Mystic management.", name),
+	})
+}
+
+func (r *Router) handleAdoptWorkload(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil || strings.TrimSpace(body.Name) == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid request body: 'name' field is required"})
+		return
+	}
+
+	wl, err := r.workloadManager.AdoptWorkload(req.Context(), body.Name)
+	if err != nil {
+		writeWorkloadError(w, err)
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"workload": wl,
+		"message":  fmt.Sprintf("External instance '%s' successfully adopted into Mystic management.", body.Name),
+	})
+}
+
 func writeWorkloadError(w http.ResponseWriter, err error) {
-	if errors.Is(err, workloads.ErrWorkloadNotFound) {
+	if errors.Is(err, workloads.ErrWorkloadNotFound) || errors.Is(err, workloads.ErrIncusInstanceNotFound) {
 		jsonResponse(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
@@ -366,7 +455,7 @@ func writeWorkloadError(w http.ResponseWriter, err error) {
 		jsonResponse(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
 	}
-	if errors.Is(err, workloads.ErrOwnershipConflict) || errors.Is(err, workloads.ErrWorkloadConfigConflict) || errors.Is(err, workloads.ErrOperationAlreadyInProgress) {
+	if errors.Is(err, workloads.ErrAlreadyManaged) || errors.Is(err, workloads.ErrOwnershipConflict) || errors.Is(err, workloads.ErrWorkloadConfigConflict) || errors.Is(err, workloads.ErrOperationAlreadyInProgress) {
 		jsonResponse(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}

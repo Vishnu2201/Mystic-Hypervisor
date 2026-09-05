@@ -32,6 +32,7 @@ const (
 	StatusStopped      WorkloadStatus = "STOPPED"
 	StatusFailed       WorkloadStatus = "FAILED"
 	StatusDrifted      WorkloadStatus = "DRIFTED"
+	StatusOrphaned     WorkloadStatus = "ORPHANED"
 	StatusUnknown      WorkloadStatus = "UNKNOWN"
 )
 
@@ -64,21 +65,21 @@ type Workload struct {
 
 // WorkloadSpec defines the payload for creating a workload intent.
 type WorkloadSpec struct {
-	Name          string                        `json:"name"`
-	Provider      string                        `json:"provider"`
-	Type          WorkloadType                  `json:"type"`
-	Image         string                        `json:"image"`
-	Project       string                        `json:"project"`
-	Profile       string                        `json:"profile"`
-	CPU           int                           `json:"cpu"`
-	MemoryMB      int64                         `json:"memory_mb"`
-	StorageGB     int64                         `json:"storage_gb"`
-	HostID        string                        `json:"host_id"`
-	NetworkName   string                        `json:"network_name"`
-	PrivateIP     string                        `json:"private_ip"`
-	ExposureMode  hosts.ExposureMode            `json:"exposure_mode"`
-	GatewayID     string                        `json:"gateway_id,omitempty"`
-	PortRequest   networking.PortAllocationRequest `json:"port_request"`
+	Name         string                           `json:"name"`
+	Provider     string                           `json:"provider"`
+	Type         WorkloadType                     `json:"type"`
+	Image        string                           `json:"image"`
+	Project      string                           `json:"project"`
+	Profile      string                           `json:"profile"`
+	CPU          int                              `json:"cpu"`
+	MemoryMB     int64                            `json:"memory_mb"`
+	StorageGB    int64                            `json:"storage_gb"`
+	HostID       string                           `json:"host_id"`
+	NetworkName  string                           `json:"network_name"`
+	PrivateIP    string                           `json:"private_ip"`
+	ExposureMode hosts.ExposureMode               `json:"exposure_mode"`
+	GatewayID    string                           `json:"gateway_id,omitempty"`
+	PortRequest  networking.PortAllocationRequest `json:"port_request"`
 }
 
 // ProvisioningPlan summarizes pre-flight validation and action sequence.
@@ -100,9 +101,30 @@ type ProvisioningPlan struct {
 	CreatedAt        string                      `json:"created_at"`
 }
 
+// AdoptionPreview provides a read-only preview of an external instance prior to adoption.
+type AdoptionPreview struct {
+	InstanceName   string                       `json:"instance_name"`
+	Provider       string                       `json:"provider"`
+	Type           interfaces.InstanceType      `json:"type"`
+	State          interfaces.InstanceState     `json:"state"`
+	IPAddress      string                       `json:"ip_address,omitempty"`
+	CPUCores       int                          `json:"cpu_cores"`
+	MemoryBytes    int64                        `json:"memory_bytes"`
+	StorageGB      int64                        `json:"storage_gb"`
+	Image          string                       `json:"image"`
+	Network        string                       `json:"network"`
+	Ownership      interfaces.InstanceOwnership `json:"ownership"`
+	AlreadyManaged bool                         `json:"already_managed"`
+	CanAdopt       bool                         `json:"can_adopt"`
+	Blockers       []string                     `json:"blockers"`
+	Warnings       []string                     `json:"warnings"`
+}
+
 // WorkloadService defines workload management boundaries.
 type WorkloadService interface {
 	CreateWorkload(ctx context.Context, spec WorkloadSpec) (*Workload, error)
+	AdoptWorkload(ctx context.Context, name string) (*Workload, error)
+	GetAdoptionPreview(ctx context.Context, name string) (*AdoptionPreview, error)
 	ValidateWorkload(ctx context.Context, id string) (*networking.ValidationResult, error)
 	GeneratePlan(ctx context.Context, id string) (*ProvisioningPlan, error)
 	ApprovePlan(ctx context.Context, id string) error

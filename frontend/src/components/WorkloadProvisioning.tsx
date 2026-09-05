@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { ProviderPreflightResult } from '../types'
+import { AdoptionModal } from './AdoptionModal'
 
 export interface WorkloadItem {
   id: string
@@ -51,6 +52,7 @@ export const WorkloadProvisioning: React.FC = () => {
   const [activePlan, setActivePlan] = useState<any | null>(null)
   const [validationResult, setValidationResult] = useState<any | null>(null)
   const [opMessage, setOpMessage] = useState('')
+  const [adoptTargetName, setAdoptTargetName] = useState<string | null>(null)
 
   useEffect(() => {
     fetchWorkloads()
@@ -299,13 +301,54 @@ export const WorkloadProvisioning: React.FC = () => {
         </div>
       )}
 
-      {/* SAFETY WARNING BANNER FOR EXISTING RESOURCES */}
+      {/* SAFETY WARNING BANNER & EXTERNAL INSTANCE ADOPTION LIST */}
       {preflight && preflight.existing_instances && preflight.existing_instances.length > 0 && (
-        <div style={{ backgroundColor: '#1e293b', padding: '14px 18px', borderRadius: '6px', borderLeft: '4px solid #f59e0b', fontSize: '0.85rem' }}>
-          <strong style={{ color: '#fbbf24' }}>Infrastructure Coexistence Active: </strong>
-          <span>
-            {preflight.existing_instances.length} existing hypervisor instance(s) detected. Mystic Hypervisor will preserve and NOT automatically adopt or delete external resources.
-          </span>
+        <div style={{ backgroundColor: '#1e293b', padding: '16px', borderRadius: '6px', borderLeft: '4px solid #f59e0b', fontSize: '0.85rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <div>
+              <strong style={{ color: '#fbbf24' }}>Infrastructure Coexistence Active: </strong>
+              <span>
+                {preflight.existing_instances.length} hypervisor instance(s) detected on host. Mystic Hypervisor preserves external resources.
+              </span>
+            </div>
+          </div>
+          {preflight.existing_instances.some(i => i.ownership === 'EXTERNAL') && (
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '8px' }}>
+              <span style={{ color: '#94a3b8', fontSize: '0.8rem', display: 'flex', alignItems: 'center' }}>Unmanaged External Instances:</span>
+              {preflight.existing_instances.filter(i => i.ownership === 'EXTERNAL').map(inst => (
+                <div
+                  key={inst.name}
+                  style={{
+                    backgroundColor: '#0f172a',
+                    border: '1px solid #451a03',
+                    padding: '4px 10px',
+                    borderRadius: '4px',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '8px'
+                  }}
+                >
+                  <span style={{ color: '#f8fafc', fontWeight: 600 }}>{inst.name}</span>
+                  <span style={{ color: '#94a3b8', fontSize: '0.75rem' }}>({inst.type}, {inst.state})</span>
+                  <button
+                    onClick={() => setAdoptTargetName(inst.name)}
+                    style={{
+                      backgroundColor: '#0284c7',
+                      color: '#fff',
+                      border: 'none',
+                      padding: '2px 8px',
+                      borderRadius: '4px',
+                      fontSize: '0.75rem',
+                      cursor: 'pointer',
+                      fontWeight: 600
+                    }}
+                  >
+                    Adopt
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -594,6 +637,18 @@ export const WorkloadProvisioning: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* ADOPTION MODAL */}
+      {adoptTargetName && (
+        <AdoptionModal
+          instanceName={adoptTargetName}
+          onClose={() => setAdoptTargetName(null)}
+          onSuccess={() => {
+            fetchWorkloads()
+            fetchPreflight()
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -607,6 +662,7 @@ function getStatusBg(status: string): string {
     case 'PLANNED': return '#0d9488'
     case 'DRAFT': return '#64748b'
     case 'FAILED': return '#dc2626'
+    case 'ORPHANED': return '#9333ea'
     case 'UNKNOWN': return '#d97706'
     default: return '#64748b'
   }

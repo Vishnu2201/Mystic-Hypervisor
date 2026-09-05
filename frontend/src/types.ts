@@ -64,3 +64,21 @@ export interface ProviderPreflightResult {
   warnings: string[]
   blockers: string[]
 }
+
+export interface AdoptionPreviewResult {
+  instance_name: string
+  provider: string
+  type: string
+  state: string
+  ip_address?: string
+  cpu_cores: number
+  memory_bytes: number
+  storage_gb: number
+  image: string
+  network: string
+  ownership: InstanceOwnership
+  already_managed: boolean
+  can_adopt: boolean
+  blockers: string[]
+  warnings: string[]
+}

@@ -38,8 +38,10 @@ var (
 	ErrOwnershipConflict          = errors.New("ownership conflict: resource is external or not owned by Mystic")
 	ErrWorkloadConfigConflict     = errors.New("configuration conflict: existing resource specifications differ from workload desired state")
 	ErrIllegalStateTransition     = errors.New("illegal workload lifecycle state transition")
-	ErrProviderCapabilityMissing = errors.New("requested operation not supported by provider capabilities")
+	ErrProviderCapabilityMissing  = errors.New("requested operation not supported by provider capabilities")
 	ErrOperationAlreadyInProgress = errors.New("idempotency conflict: identical operation is already in progress or completed")
+	ErrAlreadyManaged             = errors.New("instance is already managed by Mystic")
+	ErrIncusInstanceNotFound      = errors.New("external instance not found on provider")
 )
 
 // OperationRecord tracks deterministic operation identity for idempotency.
