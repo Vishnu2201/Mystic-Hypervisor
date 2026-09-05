@@ -227,12 +227,60 @@ func (em *ExposureManager) DeleteNetworkExposure(ctx context.Context, id string)
 	em.mu.Lock()
 	defer em.mu.Unlock()
 
-	if _, exists := em.exposures[id]; !exists {
+	exp, exists := em.exposures[id]
+	if !exists {
 		return fmt.Errorf("exposure '%s' not found: %w", id, ErrExposureNotFound)
+	}
+
+	if em.driver != nil {
+		_ = em.driver.DeleteExposure(ctx, exp)
 	}
 
 	delete(em.exposures, id)
 	return em.saveStoreUnlocked()
+}
+
+// SetDriver sets or updates the ProviderExposureDriver implementation.
+func (em *ExposureManager) SetDriver(driver ProviderExposureDriver) {
+	em.mu.Lock()
+	defer em.mu.Unlock()
+	em.driver = driver
+}
+
+// ApplyExposure executes real provider exposure application (e.g. creating Incus proxy device).
+func (em *ExposureManager) ApplyExposure(ctx context.Context, id string) (*NetworkExposure, error) {
+	em.mu.Lock()
+	defer em.mu.Unlock()
+
+	exp, exists := em.exposures[id]
+	if !exists {
+		return nil, fmt.Errorf("exposure '%s' not found: %w", id, ErrExposureNotFound)
+	}
+
+	if em.driver == nil {
+		return nil, fmt.Errorf("no provider exposure driver is attached")
+	}
+
+	exp.DesiredState = hosts.ExposureStateApplied
+	exp.UpdatedAt = time.Now()
+
+	err := em.driver.CreateExposure(ctx, exp)
+	if err != nil {
+		exp.ActualState = hosts.ExposureStateUnconfigured
+		exp.SyncStatus = instances.SyncOutOfSync
+		_ = em.saveStoreUnlocked()
+		return nil, fmt.Errorf("provider failed to apply exposure: %w", err)
+	}
+
+	exp.ActualState = hosts.ExposureStateApplied
+	exp.SyncStatus = instances.SyncInSync
+	exp.LastSync = time.Now()
+
+	if err := em.saveStoreUnlocked(); err != nil {
+		return nil, err
+	}
+
+	return exp, nil
 }
 
 // ValidateNetworkExposure validates a network exposure proposal against AllocatorEngine.

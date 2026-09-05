@@ -138,6 +138,7 @@ func (r *Router) registerRoutes() {
 	r.mux.HandleFunc("PATCH /api/v1/network/exposures/{id}", r.handleUpdateExposure)
 	r.mux.HandleFunc("DELETE /api/v1/network/exposures/{id}", r.handleDeleteExposure)
 	r.mux.HandleFunc("POST /api/v1/network/exposures/{id}/validate", r.handleValidateExposure)
+	r.mux.HandleFunc("POST /api/v1/network/exposures/{id}/apply", r.handleApplyExposure)
 	r.mux.HandleFunc("POST /api/v1/network/exposures/{id}/reconcile", r.handleReconcileExposure)
 	r.mux.HandleFunc("GET /api/v1/workloads/{id}/exposures", r.handleWorkloadExposures)
 
@@ -734,6 +735,22 @@ func (r *Router) handleValidateExposure(w http.ResponseWriter, req *http.Request
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"validation_result": res})
+}
+
+func (r *Router) handleApplyExposure(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/network/exposures/")
+	id = strings.TrimSuffix(id, "/apply")
+
+	exp, err := r.workloadManager.ExposureManager().ApplyExposure(req.Context(), id)
+	if err != nil {
+		if errors.Is(err, networking.ErrExposureNotFound) {
+			jsonError(w, http.StatusNotFound, err.Error())
+		} else {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"exposure": exp, "message": "Exposure applied on provider."})
 }
 
 func (r *Router) handleReconcileExposure(w http.ResponseWriter, req *http.Request) {

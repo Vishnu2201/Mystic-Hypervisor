@@ -73,7 +73,8 @@ func NewManagerWithProvider(provider interfaces.Provider) *Manager {
 // NewManagerWithProviderAndStore constructs a WorkloadManager with provider and persistent store.
 func NewManagerWithProviderAndStore(provider interfaces.Provider, store Store) *Manager {
 	expStore := networking.NewFileExposureStore("")
-	expMgr := networking.NewExposureManager(expStore, nil)
+	incusProxyDriver := incus.NewIncusProxyDriver("/var/lib/incus/unix.socket")
+	expMgr := networking.NewExposureManager(expStore, incusProxyDriver)
 	svcStore := services.NewFileServiceStore("")
 	svcMgr := services.NewServiceManager(svcStore, expMgr)
 	connStore := connections.NewFileConnectionStore("")
