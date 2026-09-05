@@ -9,21 +9,21 @@ const (
 
 // Permission constants matching Constitution section 20
 const (
-	PermHostRead     = "host.read"
-	PermHostManage   = "host.manage"
-	PermInstRead     = "instance.read"
-	PermInstCreate   = "instance.create"
-	PermInstStart    = "instance.start"
-	PermInstStop     = "instance.stop"
-	PermInstDelete   = "instance.delete"
-	PermInstConsole  = "instance.console"
-	PermNetRead      = "network.read"
-	PermNetManage    = "network.manage"
-	PermStorageRead  = "storage.read"
+	PermHostRead      = "host.read"
+	PermHostManage    = "host.manage"
+	PermInstRead      = "instance.read"
+	PermInstCreate    = "instance.create"
+	PermInstStart     = "instance.start"
+	PermInstStop      = "instance.stop"
+	PermInstDelete    = "instance.delete"
+	PermInstConsole   = "instance.console"
+	PermNetRead       = "network.read"
+	PermNetManage     = "network.manage"
+	PermStorageRead   = "storage.read"
 	PermStorageManage = "storage.manage"
-	PermUserRead     = "user.read"
-	PermUserManage   = "user.manage"
-	PermAuditRead    = "audit.read"
+	PermUserRead      = "user.read"
+	PermUserManage    = "user.manage"
+	PermAuditRead     = "audit.read"
 )
 
 // PolicyEngine checks if a given role has a required permission.

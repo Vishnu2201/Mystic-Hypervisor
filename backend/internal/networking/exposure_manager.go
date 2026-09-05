@@ -21,11 +21,12 @@ var (
 
 // ExposureManager manages first-class network exposures and integrates with AllocatorEngine.
 type ExposureManager struct {
-	mu        sync.RWMutex
-	exposures map[string]*NetworkExposure
-	allocator *AllocatorEngine
-	store     ExposureStore
-	driver    ProviderExposureDriver
+	mu           sync.RWMutex
+	exposures    map[string]*NetworkExposure
+	allocator    *AllocatorEngine
+	sshAllocator *SSHPortAllocator
+	store        ExposureStore
+	driver       ProviderExposureDriver
 }
 
 // NewExposureManager constructs an ExposureManager with default FileExposureStore.
@@ -47,7 +48,16 @@ func NewExposureManager(store ExposureStore, driver ProviderExposureDriver) *Exp
 		logging.GetLogger().Error("Failed to load network exposure store", "store_path", store.FilePath(), "error", err)
 	}
 
+	sshStore := NewFileSSHAllocationStore("")
+	em.sshAllocator = NewSSHPortAllocator(sshStore, em)
+	em.sshAllocator.ReconcileJeskoAndExistingInfrastructure(context.Background(), em.exposures)
+
 	return em
+}
+
+// SSHPortAllocator returns the attached public SSH port allocator instance.
+func (em *ExposureManager) SSHPortAllocator() *SSHPortAllocator {
+	return em.sshAllocator
 }
 
 // StorePath returns the file path of the underlying exposure store.
@@ -351,6 +361,24 @@ func (em *ExposureManager) ReconcileExposure(ctx context.Context, id string) (*N
 
 	em.saveStoreUnlocked()
 	return exp, nil
+}
+
+// GetProviderExposureStatus queries live provider state for an exposure.
+func (em *ExposureManager) GetProviderExposureStatus(ctx context.Context, id string) (*NetworkExposureStatus, error) {
+	em.mu.RLock()
+	exp, exists := em.exposures[id]
+	driver := em.driver
+	em.mu.RUnlock()
+
+	if !exists {
+		return nil, fmt.Errorf("exposure '%s' not found: %w", id, ErrExposureNotFound)
+	}
+
+	if driver == nil {
+		return &NetworkExposureStatus{Active: false, State: hosts.ExposureStateUnconfigured}, nil
+	}
+
+	return driver.GetExposure(ctx, exp)
 }
 
 // ReconcileAllExposures reconciles all exposures.

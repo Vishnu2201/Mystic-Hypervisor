@@ -642,7 +642,104 @@ func (p *IncusProvider) DeleteImage(ctx context.Context, fingerprint string) err
 
 // --- SnapshotProvider Implementation ---
 
+type incusRawSnapshotDetail struct {
+	Name      string    `json:"name"`
+	Stateful  bool      `json:"stateful"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 func (p *IncusProvider) ListSnapshots(ctx context.Context, instanceID string) ([]interfaces.Snapshot, error) {
+	if err := p.Ping(ctx); err != nil {
+		return nil, interfaces.ErrProviderUnavailable
+	}
+
+	instanceID = strings.TrimSpace(instanceID)
+	if instanceID == "" || strings.HasPrefix(instanceID, "-") {
+		return nil, fmt.Errorf("invalid instance ID for snapshot listing: %w", interfaces.ErrInvalidConfiguration)
+	}
+
+	apiPath := fmt.Sprintf("/1.0/instances/%s/snapshots", instanceID)
+	outBytes, err := p.runCmd(ctx, "incus", "query", apiPath)
+	if err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "404") || strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "Not Found") {
+			return nil, interfaces.ErrInstanceNotFound
+		}
+		// Fallback to CLI list format if query returns error
+		cliBytes, cliErr := p.runCmd(ctx, "incus", "snapshot", "list", instanceID, "--format", "json")
+		if cliErr == nil {
+			var rawList []incusRawSnapshotDetail
+			if json.Unmarshal(cliBytes, &rawList) == nil {
+				snapshots := make([]interfaces.Snapshot, 0, len(rawList))
+				for _, item := range rawList {
+					snapName := item.Name
+					if idx := strings.LastIndex(snapName, "/"); idx != -1 {
+						snapName = snapName[idx+1:]
+					}
+					snapshots = append(snapshots, interfaces.Snapshot{
+						Name:       snapName,
+						InstanceID: instanceID,
+						Stateful:   item.Stateful,
+						CreatedAt:  item.CreatedAt,
+					})
+				}
+				return snapshots, nil
+			}
+		}
+		return nil, fmt.Errorf("failed to query snapshots for instance '%s': %w", instanceID, err)
+	}
+
+	// Unmarshal URI array or object array
+	var uris []string
+	if err := json.Unmarshal(outBytes, &uris); err == nil {
+		snapshots := make([]interfaces.Snapshot, 0, len(uris))
+		for _, uri := range uris {
+			parts := strings.Split(uri, "/")
+			snapName := parts[len(parts)-1]
+
+			// Query individual snapshot detail
+			snapDetailBytes, dErr := p.runCmd(ctx, "incus", "query", uri)
+			stateful := false
+			createdAt := time.Now()
+
+			if dErr == nil {
+				var detail incusRawSnapshotDetail
+				if json.Unmarshal(snapDetailBytes, &detail) == nil {
+					stateful = detail.Stateful
+					if !detail.CreatedAt.IsZero() {
+						createdAt = detail.CreatedAt
+					}
+				}
+			}
+
+			snapshots = append(snapshots, interfaces.Snapshot{
+				Name:       snapName,
+				InstanceID: instanceID,
+				Stateful:   stateful,
+				CreatedAt:  createdAt,
+			})
+		}
+		return snapshots, nil
+	}
+
+	var rawList []incusRawSnapshotDetail
+	if err := json.Unmarshal(outBytes, &rawList); err == nil {
+		snapshots := make([]interfaces.Snapshot, 0, len(rawList))
+		for _, item := range rawList {
+			snapName := item.Name
+			if idx := strings.LastIndex(snapName, "/"); idx != -1 {
+				snapName = snapName[idx+1:]
+			}
+			snapshots = append(snapshots, interfaces.Snapshot{
+				Name:       snapName,
+				InstanceID: instanceID,
+				Stateful:   item.Stateful,
+				CreatedAt:  item.CreatedAt,
+			})
+		}
+		return snapshots, nil
+	}
+
 	return []interfaces.Snapshot{}, nil
 }
 
@@ -650,12 +747,18 @@ func (p *IncusProvider) CreateSnapshot(ctx context.Context, instanceID, snapshot
 	if err := p.Ping(ctx); err != nil {
 		return nil, interfaces.ErrProviderUnavailable
 	}
+	instanceID = strings.TrimSpace(instanceID)
+	snapshotName = strings.TrimSpace(snapshotName)
+	if instanceID == "" || strings.HasPrefix(instanceID, "-") || snapshotName == "" || strings.HasPrefix(snapshotName, "-") {
+		return nil, fmt.Errorf("invalid instance ID or snapshot name: %w", interfaces.ErrInvalidConfiguration)
+	}
+
 	args := []string{"snapshot", "create", instanceID, snapshotName}
 	if stateful {
 		args = append(args, "--stateful")
 	}
 	if _, err := p.runCmd(ctx, "incus", args...); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("incus snapshot create failed: %w", err)
 	}
 	return &interfaces.Snapshot{
 		Name:       snapshotName,
@@ -669,16 +772,32 @@ func (p *IncusProvider) RestoreSnapshot(ctx context.Context, instanceID, snapsho
 	if err := p.Ping(ctx); err != nil {
 		return interfaces.ErrProviderUnavailable
 	}
-	_, err := p.runCmd(ctx, "incus", "snapshot", "restore", instanceID, snapshotName)
-	return err
+	instanceID = strings.TrimSpace(instanceID)
+	snapshotName = strings.TrimSpace(snapshotName)
+	if instanceID == "" || strings.HasPrefix(instanceID, "-") || snapshotName == "" || strings.HasPrefix(snapshotName, "-") {
+		return fmt.Errorf("invalid instance ID or snapshot name: %w", interfaces.ErrInvalidConfiguration)
+	}
+
+	if _, err := p.runCmd(ctx, "incus", "snapshot", "restore", instanceID, snapshotName); err != nil {
+		return fmt.Errorf("incus snapshot restore failed: %w", err)
+	}
+	return nil
 }
 
 func (p *IncusProvider) DeleteSnapshot(ctx context.Context, instanceID, snapshotName string) error {
 	if err := p.Ping(ctx); err != nil {
 		return interfaces.ErrProviderUnavailable
 	}
-	_, err := p.runCmd(ctx, "incus", "snapshot", "delete", instanceID, snapshotName)
-	return err
+	instanceID = strings.TrimSpace(instanceID)
+	snapshotName = strings.TrimSpace(snapshotName)
+	if instanceID == "" || strings.HasPrefix(instanceID, "-") || snapshotName == "" || strings.HasPrefix(snapshotName, "-") {
+		return fmt.Errorf("invalid instance ID or snapshot name: %w", interfaces.ErrInvalidConfiguration)
+	}
+
+	if _, err := p.runCmd(ctx, "incus", "snapshot", "delete", instanceID, snapshotName); err != nil {
+		return fmt.Errorf("incus snapshot delete failed: %w", err)
+	}
+	return nil
 }
 
 // --- StorageProvider Implementation ---

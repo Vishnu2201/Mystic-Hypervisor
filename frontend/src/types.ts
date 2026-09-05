@@ -100,6 +100,53 @@ export interface NetworkExposure {
   description?: string
   created_at: string
   updated_at: string
+  last_sync?: string
+}
+
+export interface NetworkExposureStatus {
+  active: boolean
+  state: string
+  ip_address?: string
+  port?: number
+  device_name?: string
+  device_type?: string
+  listen?: string
+  connect?: string
+  nat?: string
+  instance_name?: string
+  raw_device?: Record<string, string>
+}
+
+export interface SSHAccessInfo {
+  public_port: number
+  public_host: string
+  private_ip?: string
+  username: string
+  status: string
+  connection_command: string
+}
+
+export interface WorkloadSummary {
+  id: string
+  name: string
+  status: string
+  type: string
+  ip_address?: string
+  ssh?: SSHAccessInfo
+  created_at?: string
+}
+
+export interface ValidationConflict {
+  code?: string
+  message: string
+  severity?: string
+}
+
+export interface ExposureValidationResult {
+  is_valid: boolean
+  status: string
+  message: string
+  conflicts: ValidationConflict[]
 }
 
 export type ServiceType = 'SSH' | 'HTTP' | 'HTTPS' | 'TCP' | 'UDP' | 'CONSOLE'
@@ -137,4 +184,16 @@ export interface ConnectionProfile {
   cli_command?: string
   created_at: string
   updated_at: string
+}
+
+export interface Snapshot {
+  id: string
+  name: string
+  workload_id: string
+  workload_name: string
+  stateful: boolean
+  size_bytes?: number
+  created_at: string
+  status: string
+  description?: string
 }

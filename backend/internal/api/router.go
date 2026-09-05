@@ -17,6 +17,7 @@ import (
 	"github.com/mystic-hypervisor/mystic/backend/internal/providers/incus"
 	"github.com/mystic-hypervisor/mystic/backend/internal/providers/interfaces"
 	"github.com/mystic-hypervisor/mystic/backend/internal/services"
+	"github.com/mystic-hypervisor/mystic/backend/internal/snapshots"
 	"github.com/mystic-hypervisor/mystic/backend/internal/workloads"
 )
 
@@ -25,6 +26,7 @@ type Router struct {
 	cfg             *config.Config
 	mux             *http.ServeMux
 	workloadManager *workloads.Manager
+	snapshotManager *snapshots.Manager
 	incusDriver     *incus.IncusProvider
 }
 
@@ -39,6 +41,9 @@ func NewRouter(cfg *config.Config) *Router {
 	incusProv := incus.NewIncusProvider(cfg.Provider.IncusSocket)
 	wm := workloads.NewManagerWithProviderAndStore(incusProv, store)
 
+	snapStore := snapshots.NewFileSnapshotStore("")
+	snapMgr := snapshots.NewManager(snapStore, incusProv, wm)
+
 	intervalSec := 15
 	if envSec := os.Getenv("MYSTIC_RECONCILE_INTERVAL_SECONDS"); envSec != "" {
 		if parsed, err := strconv.Atoi(envSec); err == nil && parsed > 0 {
@@ -51,6 +56,7 @@ func NewRouter(cfg *config.Config) *Router {
 
 	logging.GetLogger().Info("Initialized Workload Manager with persistent store",
 		"workload_store_path", store.FilePath(),
+		"snapshot_store_path", snapStore.FilePath(),
 		"incus_socket", cfg.Provider.IncusSocket,
 		"reconcile_interval_seconds", intervalSec,
 	)
@@ -59,6 +65,7 @@ func NewRouter(cfg *config.Config) *Router {
 		cfg:             cfg,
 		mux:             http.NewServeMux(),
 		workloadManager: wm,
+		snapshotManager: snapMgr,
 		incusDriver:     incusProv,
 	}
 	r.registerRoutes()
@@ -140,6 +147,7 @@ func (r *Router) registerRoutes() {
 	r.mux.HandleFunc("POST /api/v1/network/exposures/{id}/validate", r.handleValidateExposure)
 	r.mux.HandleFunc("POST /api/v1/network/exposures/{id}/apply", r.handleApplyExposure)
 	r.mux.HandleFunc("POST /api/v1/network/exposures/{id}/reconcile", r.handleReconcileExposure)
+	r.mux.HandleFunc("GET /api/v1/network/exposures/{id}/provider", r.handleGetExposureProvider)
 	r.mux.HandleFunc("GET /api/v1/workloads/{id}/exposures", r.handleWorkloadExposures)
 
 	// Service Endpoints
@@ -158,6 +166,13 @@ func (r *Router) registerRoutes() {
 	r.mux.HandleFunc("DELETE /api/v1/connections/{id}", r.handleDeleteConnection)
 	r.mux.HandleFunc("GET /api/v1/services/{id}/connections", r.handleServiceConnections)
 	r.mux.HandleFunc("POST /api/v1/services/{id}/connection-profile", r.handleGenerateServiceConnectionProfile)
+
+	// Snapshot Endpoints
+	r.mux.HandleFunc("GET /api/v1/workloads/{id}/snapshots", r.handleListWorkloadSnapshots)
+	r.mux.HandleFunc("POST /api/v1/workloads/{id}/snapshots", r.handleCreateWorkloadSnapshot)
+	r.mux.HandleFunc("GET /api/v1/workloads/{id}/snapshots/{name}", r.handleGetWorkloadSnapshot)
+	r.mux.HandleFunc("POST /api/v1/workloads/{id}/snapshots/{name}/restore", r.handleRestoreWorkloadSnapshot)
+	r.mux.HandleFunc("DELETE /api/v1/workloads/{id}/snapshots/{name}", r.handleDeleteWorkloadSnapshot)
 }
 
 func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
@@ -765,6 +780,29 @@ func (r *Router) handleReconcileExposure(w http.ResponseWriter, req *http.Reques
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"exposure": exp})
 }
 
+func (r *Router) handleGetExposureProvider(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/network/exposures/")
+	id = strings.TrimSuffix(id, "/provider")
+
+	status, err := r.workloadManager.ExposureManager().GetProviderExposureStatus(req.Context(), id)
+	if err != nil {
+		if errors.Is(err, networking.ErrExposureNotFound) {
+			jsonResponse(w, http.StatusNotFound, map[string]interface{}{"error": err.Error()})
+			return
+		}
+		jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"provider_status": status,
+			"exposure_id":     id,
+			"error":           err.Error(),
+		})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"provider_status": status,
+		"exposure_id":     id,
+	})
+}
+
 func (r *Router) handleWorkloadExposures(w http.ResponseWriter, req *http.Request) {
 	id := extractPathID(req.URL.Path, "/api/v1/workloads/")
 	id = strings.TrimSuffix(id, "/exposures")
@@ -1001,4 +1039,148 @@ func (r *Router) handleGenerateServiceConnectionProfile(w http.ResponseWriter, r
 	}
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"connection": profile})
+}
+
+// --- Snapshot Handlers ---
+
+type createSnapshotRequest struct {
+	Name        string `json:"name"`
+	Stateful    bool   `json:"stateful"`
+	Description string `json:"description"`
+}
+
+func (r *Router) handleListWorkloadSnapshots(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/workloads/")
+	id = strings.TrimSuffix(id, "/snapshots")
+
+	list, err := r.snapshotManager.ListSnapshots(req.Context(), id)
+	if err != nil {
+		if errors.Is(err, snapshots.ErrWorkloadNotFound) || errors.Is(err, workloads.ErrWorkloadNotFound) || strings.Contains(err.Error(), "not found") {
+			jsonResponse(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"workload_id": id,
+		"count":       len(list),
+		"snapshots":   list,
+	})
+}
+
+func (r *Router) handleCreateWorkloadSnapshot(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/workloads/")
+	id = strings.TrimSuffix(id, "/snapshots")
+
+	var body createSnapshotRequest
+	if req.Body == nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "request body is required"})
+		return
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON request body"})
+		return
+	}
+
+	snap, err := r.snapshotManager.CreateSnapshot(req.Context(), id, body.Name, body.Stateful, body.Description)
+	if err != nil {
+		if errors.Is(err, snapshots.ErrInvalidSnapshotName) {
+			jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, snapshots.ErrSnapshotExists) {
+			jsonResponse(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, snapshots.ErrWorkloadNotFound) || errors.Is(err, workloads.ErrWorkloadNotFound) || strings.Contains(err.Error(), "not found") {
+			jsonResponse(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	jsonResponse(w, http.StatusCreated, map[string]interface{}{
+		"snapshot": snap,
+		"message":  fmt.Sprintf("Snapshot '%s' created successfully for workload '%s'.", snap.Name, id),
+	})
+}
+
+func (r *Router) handleGetWorkloadSnapshot(w http.ResponseWriter, req *http.Request) {
+	path := strings.TrimPrefix(req.URL.Path, "/api/v1/workloads/")
+	parts := strings.Split(path, "/snapshots/")
+	if len(parts) != 2 {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid snapshot request path"})
+		return
+	}
+	workloadID := parts[0]
+	snapshotName := parts[1]
+
+	snap, err := r.snapshotManager.GetSnapshot(req.Context(), workloadID, snapshotName)
+	if err != nil {
+		if errors.Is(err, snapshots.ErrSnapshotNotFound) || errors.Is(err, snapshots.ErrWorkloadNotFound) || errors.Is(err, workloads.ErrWorkloadNotFound) || strings.Contains(err.Error(), "not found") {
+			jsonResponse(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"snapshot": snap,
+	})
+}
+
+func (r *Router) handleRestoreWorkloadSnapshot(w http.ResponseWriter, req *http.Request) {
+	path := strings.TrimPrefix(req.URL.Path, "/api/v1/workloads/")
+	parts := strings.Split(path, "/snapshots/")
+	if len(parts) != 2 {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid snapshot restore request path"})
+		return
+	}
+	workloadID := parts[0]
+	snapshotName := strings.TrimSuffix(parts[1], "/restore")
+
+	snap, err := r.snapshotManager.RestoreSnapshot(req.Context(), workloadID, snapshotName)
+	if err != nil {
+		if errors.Is(err, snapshots.ErrSnapshotNotFound) || errors.Is(err, snapshots.ErrWorkloadNotFound) || errors.Is(err, workloads.ErrWorkloadNotFound) || strings.Contains(err.Error(), "not found") {
+			jsonResponse(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"snapshot": snap,
+		"message":  fmt.Sprintf("Workload '%s' restored successfully to snapshot '%s'.", workloadID, snapshotName),
+	})
+}
+
+func (r *Router) handleDeleteWorkloadSnapshot(w http.ResponseWriter, req *http.Request) {
+	path := strings.TrimPrefix(req.URL.Path, "/api/v1/workloads/")
+	parts := strings.Split(path, "/snapshots/")
+	if len(parts) != 2 {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid snapshot delete request path"})
+		return
+	}
+	workloadID := parts[0]
+	snapshotName := parts[1]
+
+	if err := r.snapshotManager.DeleteSnapshot(req.Context(), workloadID, snapshotName); err != nil {
+		if errors.Is(err, snapshots.ErrSnapshotNotFound) || errors.Is(err, snapshots.ErrWorkloadNotFound) || errors.Is(err, workloads.ErrWorkloadNotFound) || strings.Contains(err.Error(), "not found") {
+			jsonResponse(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"workload_id":   workloadID,
+		"snapshot_name": snapshotName,
+		"message":       fmt.Sprintf("Snapshot '%s' deleted successfully from workload '%s'.", snapshotName, workloadID),
+	})
 }

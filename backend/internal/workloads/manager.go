@@ -549,6 +549,7 @@ func (m *Manager) ReconcileAll(ctx context.Context) error {
 			w.SyncStatus = instances.SyncProviderMissing
 			w.LastProviderSync = time.Now().Format(time.RFC3339)
 		}
+		m.reconcileSSHAccessInfoUnlocked(ctx, w)
 	}
 
 	if err := m.saveStoreUnlocked(); err != nil {
@@ -796,6 +797,22 @@ func (m *Manager) ProvisionWorkload(ctx context.Context, id string) (*Workload, 
 		}
 	}
 
+	// Allocate Public SSH Port via SSHPortAllocator
+	var sshAlloc *networking.SSHAllocation
+	if m.exposureMgr != nil && m.exposureMgr.SSHPortAllocator() != nil {
+		alloc, allocErr := m.exposureMgr.SSHPortAllocator().AllocatePort(execCtx, w.ID, w.Name)
+		if allocErr != nil {
+			m.mu.Lock()
+			w.Status = StatusFailed
+			w.ErrorDetails = allocErr.Error()
+			w.UpdatedAt = time.Now().Format(time.RFC3339)
+			m.mu.Unlock()
+			m.guard.LogAudit(w.ID, "PROVISION", provider.Name(), w.Name, plan.PlanHash, "FAILED", ResultFailed, allocErr)
+			return w, allocErr
+		}
+		sshAlloc = alloc
+	}
+
 	// Resource does not exist -> Create Instance with Mystic Ownership Metadata
 	inst := &interfaces.Instance{
 		Name: w.Name,
@@ -819,6 +836,10 @@ func (m *Manager) ProvisionWorkload(ctx context.Context, id string) (*Workload, 
 
 	createdInst, createErr := instProvider.CreateInstance(execCtx, inst)
 	if createErr != nil {
+		if sshAlloc != nil && m.exposureMgr != nil && m.exposureMgr.SSHPortAllocator() != nil {
+			_ = m.exposureMgr.SSHPortAllocator().ReleasePort(execCtx, w.ID)
+		}
+
 		// Result Classification: UNKNOWN on context timeout, FAILED on provider error
 		if errors.Is(createErr, context.DeadlineExceeded) || errors.Is(createErr, context.Canceled) {
 			m.mu.Lock()
@@ -843,6 +864,44 @@ func (m *Manager) ProvisionWorkload(ctx context.Context, id string) (*Workload, 
 	// Start instance after creation
 	_ = instProvider.StartInstance(execCtx, createdInst.Name)
 	liveInst, _ := instProvider.GetInstance(execCtx, createdInst.Name)
+
+	privateIP := ""
+	if liveInst != nil && liveInst.IPAddress != "" {
+		privateIP = liveInst.IPAddress
+	}
+
+	if sshAlloc != nil {
+		sshStatus := networking.SSHStatusProvisioning
+		if privateIP != "" && m.exposureMgr != nil {
+			sshStatus = networking.SSHStatusActive
+			_, _ = m.exposureMgr.SSHPortAllocator().UpdateAllocationStatus(execCtx, w.ID, networking.SSHStatusActive, privateIP)
+			exp := &networking.NetworkExposure{
+				ID:           fmt.Sprintf("exp-%s-ssh", w.ID),
+				WorkloadID:   w.ID,
+				WorkloadName: w.Name,
+				PublicPort:   sshAlloc.PublicPort,
+				InternalPort: 22,
+				InternalIP:   privateIP,
+				Protocol:     hosts.ProtocolTCP,
+				ExposureMode: hosts.ExposureNATForwarded,
+				Description:  fmt.Sprintf("SSH Proxy for %s", w.Name),
+			}
+			if _, expErr := m.exposureMgr.CreateNetworkExposure(execCtx, exp); expErr == nil || errors.Is(expErr, networking.ErrExposureConflict) {
+				_, _ = m.exposureMgr.ApplyExposure(execCtx, exp.ID)
+			}
+		}
+
+		w.SSHAccessInfo = &networking.SSHAccessInfo{
+			Host:              sshAlloc.PublicSSHHost,
+			Port:              sshAlloc.PublicPort,
+			Username:          "root",
+			Protocol:          "TCP",
+			Status:            sshStatus,
+			AllocationID:      sshAlloc.ID,
+			IncusHostID:       sshAlloc.IncusHostID,
+			ConnectionCommand: networking.GenerateSSHConnectionCommand(sshAlloc.PublicSSHHost, sshAlloc.PublicPort, "root"),
+		}
+	}
 
 	m.mu.Lock()
 	if liveInst != nil {
@@ -1000,6 +1059,18 @@ func (m *Manager) DeleteWorkload(ctx context.Context, id string) error {
 		}
 	}
 
+	if m.exposureMgr != nil {
+		_ = m.exposureMgr.DeleteNetworkExposure(execCtx, fmt.Sprintf("exp-%s-ssh", w.ID))
+		if exps, err := m.exposureMgr.ListWorkloadExposures(execCtx, w.ID); err == nil {
+			for _, exp := range exps {
+				_ = m.exposureMgr.DeleteNetworkExposure(execCtx, exp.ID)
+			}
+		}
+		if m.exposureMgr.SSHPortAllocator() != nil {
+			_ = m.exposureMgr.SSHPortAllocator().ReleasePort(execCtx, w.ID)
+		}
+	}
+
 	m.mu.Lock()
 	delete(m.workloads, id)
 	delete(m.plans, id)
@@ -1087,8 +1158,60 @@ func (m *Manager) ReconcileWorkload(ctx context.Context, id string) (*Workload, 
 		w.Status = StatusStopped
 	}
 
+	m.reconcileSSHAccessInfoUnlocked(ctx, w)
 	m.saveStoreUnlocked()
 	return w, nil
+}
+
+func (m *Manager) reconcileSSHAccessInfoUnlocked(ctx context.Context, w *Workload) {
+	if m.exposureMgr == nil || m.exposureMgr.SSHPortAllocator() == nil {
+		return
+	}
+	alloc, err := m.exposureMgr.SSHPortAllocator().GetAllocation(ctx, w.ID)
+	if err != nil || alloc == nil {
+		return
+	}
+
+	privateIP := w.NetworkConfig.PrivateIPv4
+	sshStatus := networking.SSHStatusProvisioning
+	if privateIP != "" {
+		sshStatus = networking.SSHStatusActive
+		_, _ = m.exposureMgr.SSHPortAllocator().UpdateAllocationStatus(ctx, w.ID, networking.SSHStatusActive, privateIP)
+		expID := fmt.Sprintf("exp-%s-ssh", w.ID)
+		if exp, getErr := m.exposureMgr.GetNetworkExposure(ctx, expID); getErr == nil {
+			if exp.InternalIP != privateIP || exp.ActualState != hosts.ExposureStateApplied {
+				exp.InternalIP = privateIP
+				_, _ = m.exposureMgr.UpdateNetworkExposure(ctx, expID, exp)
+				_, _ = m.exposureMgr.ApplyExposure(ctx, expID)
+			}
+		} else {
+			exp := &networking.NetworkExposure{
+				ID:           expID,
+				WorkloadID:   w.ID,
+				WorkloadName: w.Name,
+				PublicPort:   alloc.PublicPort,
+				InternalPort: 22,
+				InternalIP:   privateIP,
+				Protocol:     hosts.ProtocolTCP,
+				ExposureMode: hosts.ExposureNATForwarded,
+				Description:  fmt.Sprintf("SSH Proxy for %s", w.Name),
+			}
+			if _, expErr := m.exposureMgr.CreateNetworkExposure(ctx, exp); expErr == nil || errors.Is(expErr, networking.ErrExposureConflict) {
+				_, _ = m.exposureMgr.ApplyExposure(ctx, exp.ID)
+			}
+		}
+	}
+
+	w.SSHAccessInfo = &networking.SSHAccessInfo{
+		Host:              alloc.PublicSSHHost,
+		Port:              alloc.PublicPort,
+		Username:          "root",
+		Protocol:          "TCP",
+		Status:            sshStatus,
+		AllocationID:      alloc.ID,
+		IncusHostID:       alloc.IncusHostID,
+		ConnectionCommand: networking.GenerateSSHConnectionCommand(alloc.PublicSSHHost, alloc.PublicPort, "root"),
+	}
 }
 
 func (m *Manager) GetWorkload(ctx context.Context, id string) (*Workload, error) {
@@ -1100,6 +1223,17 @@ func (m *Manager) GetWorkload(ctx context.Context, id string) (*Workload, error)
 		return nil, fmt.Errorf("workload '%s' not found: %w", id, ErrWorkloadNotFound)
 	}
 	return w, nil
+}
+
+func (m *Manager) ResolveWorkloadInstance(ctx context.Context, workloadID string) (string, error) {
+	w, err := m.GetWorkload(ctx, workloadID)
+	if err != nil {
+		return "", err
+	}
+	if w.Name != "" {
+		return w.Name, nil
+	}
+	return w.ID, nil
 }
 
 func (m *Manager) ListWorkloads(ctx context.Context) ([]Workload, error) {

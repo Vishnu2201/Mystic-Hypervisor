@@ -32,10 +32,17 @@ type NetworkExposure struct {
 
 // NetworkExposureStatus summarizes observed provider-side exposure runtime facts.
 type NetworkExposureStatus struct {
-	Active    bool                `json:"active"`
-	State     hosts.ExposureState `json:"state"`
-	IPAddress string              `json:"ip_address,omitempty"`
-	Port      int                 `json:"port,omitempty"`
+	Active       bool                `json:"active"`
+	State        hosts.ExposureState `json:"state"`
+	IPAddress    string              `json:"ip_address,omitempty"`
+	Port         int                 `json:"port,omitempty"`
+	DeviceName   string              `json:"device_name,omitempty"`
+	DeviceType   string              `json:"device_type,omitempty"`
+	Listen       string              `json:"listen,omitempty"`
+	Connect      string              `json:"connect,omitempty"`
+	NAT          string              `json:"nat,omitempty"`
+	InstanceName string              `json:"instance_name,omitempty"`
+	RawDevice    map[string]string   `json:"raw_device,omitempty"`
 }
 
 // ProviderExposureDriver is an optional interface implemented by virtualization drivers

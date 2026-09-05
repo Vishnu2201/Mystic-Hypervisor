@@ -19,7 +19,7 @@ const (
 type GatewayManagement string
 
 const (
-	GatewayManagedByMystic GatewayManagement = "MANAGED_BY_MYSTIC"
+	GatewayManagedByMystic   GatewayManagement = "MANAGED_BY_MYSTIC"
 	GatewayExternallyManaged GatewayManagement = "EXTERNALLY_MANAGED"
 	GatewayManagementUnknown GatewayManagement = "UNKNOWN"
 )
@@ -28,13 +28,13 @@ const (
 type ConflictStatus string
 
 const (
-	ConflictAvailable               ConflictStatus = "AVAILABLE"
+	ConflictAvailable                ConflictStatus = "AVAILABLE"
 	ConflictAlreadyAllocatedByMystic ConflictStatus = "ALREADY_ALLOCATED_BY_MYSTIC"
-	ConflictListeningOnHost         ConflictStatus = "LISTENING_ON_HOST"
-	ConflictReservedManagement      ConflictStatus = "RESERVED_MANAGEMENT"
+	ConflictListeningOnHost          ConflictStatus = "LISTENING_ON_HOST"
+	ConflictReservedManagement       ConflictStatus = "RESERVED_MANAGEMENT"
 	ConflictOwnedByExternalSubsystem ConflictStatus = "OWNED_BY_EXTERNAL_SUBSYSTEM"
-	ConflictUnknown                 ConflictStatus = "UNKNOWN"
-	ConflictPoolUnconfigured        ConflictStatus = "ALLOCATION_POOL_UNCONFIGURED"
+	ConflictUnknown                  ConflictStatus = "UNKNOWN"
+	ConflictPoolUnconfigured         ConflictStatus = "ALLOCATION_POOL_UNCONFIGURED"
 )
 
 // Interface represents a physical or virtual host network interface.
@@ -48,22 +48,22 @@ type Interface struct {
 
 // WorkloadNetworkConfig represents the network exposure identity of a VM or container.
 type WorkloadNetworkConfig struct {
-	ID                string               `json:"id"`
-	WorkloadID        string               `json:"workload_id"`
-	WorkloadName      string               `json:"workload_name"`
-	HostID            string               `json:"host_id"`
-	NetworkID         string               `json:"network_id"`
-	NetworkName       string               `json:"network_name"`
-	Interface         string               `json:"interface"`
-	PrivateIPv4       string               `json:"private_ipv4"`
-	PrivateIPv6       string               `json:"private_ipv6,omitempty"`
-	PublicIPv4        string               `json:"public_ipv4,omitempty"`
-	PublicIPv6        string               `json:"public_ipv6,omitempty"`
-	ExposureMode      hosts.ExposureMode   `json:"exposure_mode"`
-	GatewayID         string               `json:"gateway_id,omitempty"`
+	ID                string                 `json:"id"`
+	WorkloadID        string                 `json:"workload_id"`
+	WorkloadName      string                 `json:"workload_name"`
+	HostID            string                 `json:"host_id"`
+	NetworkID         string                 `json:"network_id"`
+	NetworkName       string                 `json:"network_name"`
+	Interface         string                 `json:"interface"`
+	PrivateIPv4       string                 `json:"private_ipv4"`
+	PrivateIPv6       string                 `json:"private_ipv6,omitempty"`
+	PublicIPv4        string                 `json:"public_ipv4,omitempty"`
+	PublicIPv6        string                 `json:"public_ipv6,omitempty"`
+	ExposureMode      hosts.ExposureMode     `json:"exposure_mode"`
+	GatewayID         string                 `json:"gateway_id,omitempty"`
 	ForwardingRules   []hosts.ForwardingRule `json:"forwarding_rules"`
-	AllocationState   hosts.ExposureState  `json:"allocation_state"`
-	VerificationState string               `json:"verification_state"`
+	AllocationState   hosts.ExposureState    `json:"allocation_state"`
+	VerificationState string                 `json:"verification_state"`
 }
 
 // AllocationPool defines an administrator-configured external port range pool.
@@ -78,15 +78,15 @@ type AllocationPool struct {
 
 // GatewayConfig represents detailed configuration and management capabilities of a gateway.
 type GatewayConfig struct {
-	ID                   string                 `json:"id"`
-	Name                 string                 `json:"name"`
-	Type                 hosts.GatewayType      `json:"type"`
-	PublicIPs            []string               `json:"public_ips"`
-	PrivateIPs           []string               `json:"private_ips"`
-	ManagementAddress    string                 `json:"management_address,omitempty"`
-	ManagementCapability GatewayManagement      `json:"management_capability"`
-	ManagedBy            string                 `json:"managed_by"`
-	Enabled              bool                   `json:"enabled"`
+	ID                   string            `json:"id"`
+	Name                 string            `json:"name"`
+	Type                 hosts.GatewayType `json:"type"`
+	PublicIPs            []string          `json:"public_ips"`
+	PrivateIPs           []string          `json:"private_ips"`
+	ManagementAddress    string            `json:"management_address,omitempty"`
+	ManagementCapability GatewayManagement `json:"management_capability"`
+	ManagedBy            string            `json:"managed_by"`
+	Enabled              bool              `json:"enabled"`
 }
 
 // PortMapping represents a normalized 1:1 single or range port forwarding pair.
@@ -109,17 +109,17 @@ type ConflictDetail struct {
 
 // PortAllocationRequest describes an incoming port allocation query or creation attempt.
 type PortAllocationRequest struct {
-	WorkloadID        string                `json:"workload_id"`
-	HostID            string                `json:"host_id"`
-	GatewayID         string                `json:"gateway_id,omitempty"`
-	Mode              AllocationMode        `json:"mode"` // SINGLE, RANGE, EXPLICIT
-	ExternalStartPort int                   `json:"external_start_port"`
-	ExternalEndPort   int                   `json:"external_end_port"`
-	InternalStartPort int                   `json:"internal_start_port"`
-	InternalEndPort   int                   `json:"internal_end_port"`
-	Protocol          hosts.Protocol        `json:"protocol"`
-	PublicIP          string                `json:"public_ip,omitempty"`
-	DestinationIP     string                `json:"destination_ip"`
+	WorkloadID        string                 `json:"workload_id"`
+	HostID            string                 `json:"host_id"`
+	GatewayID         string                 `json:"gateway_id,omitempty"`
+	Mode              AllocationMode         `json:"mode"` // SINGLE, RANGE, EXPLICIT
+	ExternalStartPort int                    `json:"external_start_port"`
+	ExternalEndPort   int                    `json:"external_end_port"`
+	InternalStartPort int                    `json:"internal_start_port"`
+	InternalEndPort   int                    `json:"internal_end_port"`
+	Protocol          hosts.Protocol         `json:"protocol"`
+	PublicIP          string                 `json:"public_ip,omitempty"`
+	DestinationIP     string                 `json:"destination_ip"`
 	ExplicitRules     []hosts.ForwardingRule `json:"explicit_rules,omitempty"`
 }
 

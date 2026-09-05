@@ -1116,3 +1116,72 @@ func TestBackgroundReconciliationWorkerLifecycleAndNonOverlapping(t *testing.T) 
 	// Calling Stop again should be safe
 	mgr.StopBackgroundReconciliation()
 }
+
+func TestWorkloadProvisioningSSHPortAllocation(t *testing.T) {
+	ctx := context.Background()
+	tp := NewTestProvider()
+	mgr := NewManagerWithProvider(tp)
+
+	spec := WorkloadSpec{
+		Name:         "vps-ssh-test-01",
+		Provider:     "incus",
+		Type:         TypeIncusContainer,
+		Image:        "images:debian/13",
+		CPU:          1,
+		MemoryMB:     1024,
+		StorageGB:    10,
+		HostID:       "host-main",
+		PrivateIP:    "10.0.0.199",
+		ExposureMode: hosts.ExposurePrivateOnly,
+	}
+
+	w, err := mgr.CreateWorkload(ctx, spec)
+	if err != nil {
+		t.Fatalf("CreateWorkload failed: %v", err)
+	}
+
+	_, err = mgr.GeneratePlan(ctx, w.ID)
+	if err != nil {
+		t.Fatalf("GeneratePlan failed: %v", err)
+	}
+
+	if err := mgr.ApprovePlan(ctx, w.ID); err != nil {
+		t.Fatalf("ApprovePlan failed: %v", err)
+	}
+
+	provisioned, err := mgr.ProvisionWorkload(ctx, w.ID)
+	if err != nil {
+		t.Fatalf("ProvisionWorkload failed: %v", err)
+	}
+
+	if provisioned.SSHAccessInfo == nil {
+		t.Fatalf("Expected SSHAccessInfo to be populated upon provisioning")
+	}
+
+	if provisioned.SSHAccessInfo.Port < 22100 || provisioned.SSHAccessInfo.Port > 22200 {
+		t.Errorf("Expected allocated SSH port in range 22100-22200, got %d", provisioned.SSHAccessInfo.Port)
+	}
+
+	if provisioned.SSHAccessInfo.Host != "ssh.mysticservers.com" {
+		t.Errorf("Expected SSH host ssh.mysticservers.com, got %s", provisioned.SSHAccessInfo.Host)
+	}
+
+	if provisioned.SSHAccessInfo.Status != networking.SSHStatusActive {
+		t.Errorf("Expected SSH status ACTIVE, got %s", provisioned.SSHAccessInfo.Status)
+	}
+
+	expectedCmd := networking.GenerateSSHConnectionCommand(provisioned.SSHAccessInfo.Host, provisioned.SSHAccessInfo.Port, "root")
+	if provisioned.SSHAccessInfo.ConnectionCommand != expectedCmd {
+		t.Errorf("Expected connection command '%s', got '%s'", expectedCmd, provisioned.SSHAccessInfo.ConnectionCommand)
+	}
+
+	// Verify deletion releases SSH port
+	if err := mgr.DeleteWorkload(ctx, w.ID); err != nil {
+		t.Fatalf("DeleteWorkload failed: %v", err)
+	}
+
+	_, getErr := mgr.ExposureManager().SSHPortAllocator().GetAllocation(ctx, w.ID)
+	if getErr == nil {
+		t.Errorf("Expected SSH allocation to be released/not found after workload deletion")
+	}
+}

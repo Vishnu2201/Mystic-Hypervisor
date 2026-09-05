@@ -57,6 +57,7 @@ type Workload struct {
 	NetworkConfig      networking.WorkloadNetworkConfig `json:"network_config"`
 	PortRequest        networking.PortAllocationRequest `json:"port_request,omitempty"`
 	PlanHash           string                           `json:"plan_hash,omitempty"`
+	SSHAccessInfo      *networking.SSHAccessInfo        `json:"ssh,omitempty"`
 	CreatedAt          string                           `json:"created_at"`
 	UpdatedAt          string                           `json:"updated_at"`
 	LastProviderSync   string                           `json:"last_provider_sync"`

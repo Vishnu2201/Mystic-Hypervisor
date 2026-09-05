@@ -56,4 +56,3 @@ func (cs CapabilitySet) Slice() []string {
 	}
 	return list
 }
-

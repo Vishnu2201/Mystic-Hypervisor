@@ -32,15 +32,15 @@ type dummyProvider struct {
 	caps CapabilitySet
 }
 
-func (d *dummyProvider) Name() string                                  { return d.name }
-func (d *dummyProvider) Capabilities() CapabilitySet                  { return d.caps }
-func (d *dummyProvider) Ping(ctx context.Context) error                { return nil }
-func (d *dummyProvider) Close() error                                  { return nil }
-func (d *dummyProvider) InstanceProvider() (InstanceProvider, bool)   { return nil, false }
-func (d *dummyProvider) ImageProvider() (ImageProvider, bool)          { return nil, false }
-func (d *dummyProvider) SnapshotProvider() (SnapshotProvider, bool)   { return nil, false }
-func (d *dummyProvider) StorageProvider() (StorageProvider, bool)     { return nil, false }
-func (d *dummyProvider) NetworkProvider() (NetworkProvider, bool)     { return nil, false }
+func (d *dummyProvider) Name() string                               { return d.name }
+func (d *dummyProvider) Capabilities() CapabilitySet                { return d.caps }
+func (d *dummyProvider) Ping(ctx context.Context) error             { return nil }
+func (d *dummyProvider) Close() error                               { return nil }
+func (d *dummyProvider) InstanceProvider() (InstanceProvider, bool) { return nil, false }
+func (d *dummyProvider) ImageProvider() (ImageProvider, bool)       { return nil, false }
+func (d *dummyProvider) SnapshotProvider() (SnapshotProvider, bool) { return nil, false }
+func (d *dummyProvider) StorageProvider() (StorageProvider, bool)   { return nil, false }
+func (d *dummyProvider) NetworkProvider() (NetworkProvider, bool)   { return nil, false }
 
 func TestProviderRegistry(t *testing.T) {
 	ResetRegistry()

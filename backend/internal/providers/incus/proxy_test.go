@@ -49,7 +49,12 @@ func TestIncusProxyDriverCreateMissingDevice(t *testing.T) {
 	}
 
 	if len(executedCmds) != 2 {
-		t.Fatalf("Expected 2 command executions (show + device add), got %d", len(executedCmds))
+		t.Fatalf("Expected 2 command executions (query + device add), got %d", len(executedCmds))
+	}
+
+	queryCmd := executedCmds[0]
+	if len(queryCmd) != 3 || queryCmd[0] != "incus" || queryCmd[1] != "query" || queryCmd[2] != "/1.0/instances/test-nano" {
+		t.Fatalf("Expected query command ['incus', 'query', '/1.0/instances/test-nano'], got %v", queryCmd)
 	}
 
 	addCmd := executedCmds[1]
@@ -101,9 +106,9 @@ func TestIncusProxyDriverCreateIdenticalDeviceNoOp(t *testing.T) {
 		t.Fatalf("CreateExposure failed: %v", err)
 	}
 
-	// Should be no-op after config show
+	// Should be no-op after query
 	if len(executedCmds) != 1 {
-		t.Fatalf("Expected only 1 command execution (config show), got %d", len(executedCmds))
+		t.Fatalf("Expected only 1 command execution (incus query), got %d", len(executedCmds))
 	}
 }
 
@@ -148,10 +153,139 @@ func TestIncusProxyDriverUpdateDifferingDevice(t *testing.T) {
 	}
 
 	if len(executedCmds) != 2 {
-		t.Fatalf("Expected 2 command executions (show + device set), got %d", len(executedCmds))
+		t.Fatalf("Expected 2 command executions (query + device set), got %d", len(executedCmds))
 	}
 	if executedCmds[1][3] != "set" {
 		t.Fatalf("Expected 'config device set' command for update, got %v", executedCmds[1])
+	}
+}
+
+func TestIncusProxyDriverExpandedDevicesPreference(t *testing.T) {
+	ctx := context.Background()
+	driver := NewIncusProxyDriver("")
+
+	driver.SetExecRunner(func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "incus" && len(args) >= 2 && args[0] == "query" {
+			return []byte(`{
+				"name":"test-nano",
+				"devices":{
+					"mystic-exp-exp-01": {
+						"type": "proxy",
+						"listen": "tcp:51.162.178.199:1111",
+						"connect": "tcp:10.170.92.70:22"
+					}
+				},
+				"expanded_devices":{
+					"mystic-exp-exp-01": {
+						"type": "proxy",
+						"listen": "tcp:51.162.178.199:2222",
+						"connect": "tcp:10.170.92.70:22",
+						"nat": "true"
+					}
+				}
+			}`), nil
+		}
+		return []byte(""), nil
+	})
+
+	exp := &networking.NetworkExposure{
+		ID:           "exp-01",
+		WorkloadName: "test-nano",
+		PublicIP:     "51.162.178.199",
+		PublicPort:   2222,
+		InternalIP:   "10.170.92.70",
+		InternalPort: 22,
+		Protocol:     hosts.ProtocolTCP,
+	}
+
+	status, err := driver.GetExposure(ctx, exp)
+	if err != nil || !status.Active || status.State != hosts.ExposureStateApplied {
+		t.Fatalf("Expected expanded_devices to take precedence and report active applied state, got: active=%v, state=%s, err=%v", status.Active, status.State, err)
+	}
+}
+
+func TestIncusProxyDriverDevicesFallback(t *testing.T) {
+	ctx := context.Background()
+	driver := NewIncusProxyDriver("")
+
+	driver.SetExecRunner(func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "incus" && len(args) >= 2 && args[0] == "query" {
+			return []byte(`{
+				"name":"test-nano",
+				"devices":{
+					"mystic-exp-exp-01": {
+						"type": "proxy",
+						"listen": "tcp:51.162.178.199:2222",
+						"connect": "tcp:10.170.92.70:22",
+						"nat": "true"
+					}
+				}
+			}`), nil
+		}
+		return []byte(""), nil
+	})
+
+	exp := &networking.NetworkExposure{
+		ID:           "exp-01",
+		WorkloadName: "test-nano",
+		PublicIP:     "51.162.178.199",
+		PublicPort:   2222,
+		InternalIP:   "10.170.92.70",
+		InternalPort: 22,
+		Protocol:     hosts.ProtocolTCP,
+	}
+
+	status, err := driver.GetExposure(ctx, exp)
+	if err != nil || !status.Active || status.State != hosts.ExposureStateApplied {
+		t.Fatalf("Expected devices fallback to work when expanded_devices is absent, got: active=%v, state=%s, err=%v", status.Active, status.State, err)
+	}
+}
+
+func TestIncusProxyDriverMalformedJSON(t *testing.T) {
+	ctx := context.Background()
+	driver := NewIncusProxyDriver("")
+
+	driver.SetExecRunner(func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return []byte(`{invalid json response`), nil
+	})
+
+	exp := &networking.NetworkExposure{
+		ID:           "exp-01",
+		WorkloadName: "test-nano",
+		PublicIP:     "51.162.178.199",
+		PublicPort:   2222,
+		InternalIP:   "10.170.92.70",
+		InternalPort: 22,
+		Protocol:     hosts.ProtocolTCP,
+	}
+
+	err := driver.CreateExposure(ctx, exp)
+	if err == nil || !strings.Contains(err.Error(), "failed to parse Incus instance API JSON") {
+		t.Fatalf("Expected JSON parse error for malformed JSON, got: %v", err)
+	}
+}
+
+func TestIncusProxyDriverInstanceNotFound(t *testing.T) {
+	ctx := context.Background()
+	driver := NewIncusProxyDriver("")
+
+	driver.SetExecRunner(func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return nil, errors.New("Error: 404 Instance not found")
+	})
+
+	exp := &networking.NetworkExposure{
+		ID:           "exp-01",
+		WorkloadName: "nonexistent-instance",
+		PublicIP:     "51.162.178.199",
+		PublicPort:   2222,
+		InternalIP:   "10.170.92.70",
+		InternalPort: 22,
+		Protocol:     hosts.ProtocolTCP,
+	}
+
+	err := driver.CreateExposure(ctx, exp)
+	if err == nil || !errors.Is(err, ErrInstanceNotFound) {
+		t.Fatalf("Expected ErrInstanceNotFound when query returns 404, got: %v", err)
 	}
 }
 

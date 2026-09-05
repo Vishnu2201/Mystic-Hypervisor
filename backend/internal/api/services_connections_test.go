@@ -156,3 +156,55 @@ func TestGenerateConnectionProfileAPI(t *testing.T) {
 		t.Fatalf("Expected CLI 'ssh -p 2222 root@51.162.178.199', got '%s'", genRes.Connection.CLICommand)
 	}
 }
+
+func TestGetExposureProviderAPI(t *testing.T) {
+	router, tempDir := setupTestRouter(t)
+	defer os.RemoveAll(tempDir)
+
+	ctx := context.Background()
+
+	// 1. Create Exposure
+	exp, err := router.workloadManager.ExposureManager().CreateNetworkExposure(ctx, &networking.NetworkExposure{
+		ID:           "exp-prov-01",
+		WorkloadID:   "wl-prov-01",
+		WorkloadName: "test-nano",
+		PublicIP:     "51.162.178.199",
+		PublicPort:   2222,
+		InternalIP:   "10.170.92.70",
+		InternalPort: 22,
+		Protocol:     hosts.ProtocolTCP,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create exposure: %v", err)
+	}
+
+	// 2. GET /api/v1/network/exposures/{id}/provider
+	reqProv := httptest.NewRequest(http.MethodGet, "/api/v1/network/exposures/"+exp.ID+"/provider", nil)
+	recProv := httptest.NewRecorder()
+	router.ServeHTTP(recProv, reqProv)
+
+	if recProv.Code != http.StatusOK {
+		t.Fatalf("Expected StatusOK (200), got %d: %s", recProv.Code, recProv.Body.String())
+	}
+
+	var provRes struct {
+		ProviderStatus networking.NetworkExposureStatus `json:"provider_status"`
+		ExposureID     string                           `json:"exposure_id"`
+	}
+	if err := json.Unmarshal(recProv.Body.Bytes(), &provRes); err != nil {
+		t.Fatalf("Failed to unmarshal provider response: %v", err)
+	}
+
+	if provRes.ExposureID != exp.ID {
+		t.Fatalf("Expected exposure_id %s, got %s", exp.ID, provRes.ExposureID)
+	}
+
+	// 3. Test non-existent exposure GET /api/v1/network/exposures/exp-nonexistent/provider
+	req404 := httptest.NewRequest(http.MethodGet, "/api/v1/network/exposures/exp-nonexistent/provider", nil)
+	rec404 := httptest.NewRecorder()
+	router.ServeHTTP(rec404, req404)
+
+	if rec404.Code != http.StatusNotFound {
+		t.Fatalf("Expected StatusNotFound (404), got %d: %s", rec404.Code, rec404.Body.String())
+	}
+}

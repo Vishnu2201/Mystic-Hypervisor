@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { ProviderPreflightResult, NetworkExposure, Service, ConnectionProfile } from '../types'
+import { ProviderPreflightResult, NetworkExposure, Service, ConnectionProfile, SSHAccessInfo } from '../types'
 import { AdoptionModal } from './AdoptionModal'
 
 export interface WorkloadItem {
@@ -20,6 +20,7 @@ export interface WorkloadItem {
   project: string
   profile: string
   network_config: any
+  ssh?: SSHAccessInfo
   created_at: string
   updated_at: string
   last_provider_sync: string
@@ -508,6 +509,50 @@ export const WorkloadProvisioning: React.FC = () => {
             <button onClick={() => handleLifecycleOp('reconcile')} style={{ backgroundColor: '#0d9488', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}>Reconcile State</button>
             <button onClick={() => handleLifecycleOp('delete')} style={{ backgroundColor: '#dc2626', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}>Delete 🗑</button>
           </div>
+
+          {/* PUBLIC SSH ACCESS CARD */}
+          {selectedWorkload.ssh && (
+            <div style={{ backgroundColor: '#0f172a', border: '1px solid #0284c7', borderRadius: '6px', padding: '14px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ fontWeight: 600, color: '#38bdf8', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span>🔑 Public SSH Access</span>
+                  <span style={{ padding: '2px 8px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: 600, backgroundColor: selectedWorkload.ssh.status === 'ACTIVE' ? '#16a34a' : '#d97706', color: '#fff' }}>
+                    {selectedWorkload.ssh.status}
+                  </span>
+                </div>
+                <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>Port Range: 22100 - 22200</span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px', fontSize: '0.8rem' }}>
+                <div>
+                  <span style={{ color: '#94a3b8', display: 'block' }}>Public SSH Host</span>
+                  <strong style={{ color: '#f8fafc' }}>{selectedWorkload.ssh.public_host}</strong>
+                </div>
+                <div>
+                  <span style={{ color: '#94a3b8', display: 'block' }}>Public Port</span>
+                  <strong style={{ color: '#38bdf8', fontSize: '1rem' }}>{selectedWorkload.ssh.public_port}</strong>
+                </div>
+                <div>
+                  <span style={{ color: '#94a3b8', display: 'block' }}>Target Username</span>
+                  <strong style={{ color: '#f8fafc' }}>{selectedWorkload.ssh.username}</strong>
+                </div>
+              </div>
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                  <span style={{ color: '#94a3b8', fontSize: '0.8rem' }}>SSH Connection Command</span>
+                  {copyFeedback && <span style={{ color: '#4ade80', fontSize: '0.75rem', fontWeight: 600 }}>{copyFeedback}</span>}
+                </div>
+                <div style={{ backgroundColor: '#1e293b', padding: '8px 12px', borderRadius: '4px', border: '1px solid #334155', color: '#f8fafc', fontFamily: 'monospace', fontSize: '0.85rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span>{selectedWorkload.ssh.connection_command}</span>
+                  <button
+                    onClick={() => handleCopyCommand(selectedWorkload.ssh?.connection_command || '')}
+                    style={{ backgroundColor: '#0284c7', color: '#fff', border: 'none', padding: '4px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 600, marginLeft: '8px' }}
+                  >
+                    Copy SSH Command
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* NETWORK EXPOSURES SECTION */}
           <div style={{ marginTop: '8px', borderTop: '1px solid #334155', paddingTop: '12px' }}>
