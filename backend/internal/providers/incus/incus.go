@@ -125,6 +125,7 @@ type incusDevice struct {
 	Name    string `json:"name"`
 	Network string `json:"network"`
 	Parent  string `json:"parent"`
+	Size    string `json:"size"`
 }
 
 type incusRawInstance struct {
@@ -355,8 +356,21 @@ func (p *IncusProvider) ListInstances(ctx context.Context) ([]interfaces.Instanc
 		state := parseIncusState(item.Status)
 		ip := extractPrimaryIP(item)
 
-		cores, _ := strconv.Atoi(item.Config["limits.cpu"])
-		memBytes, _ := strconv.ParseInt(item.Config["limits.memory"], 10, 64)
+		cores, err := parseIncusCPULimit(item.Config["limits.cpu"])
+		if err != nil && item.Config["limits.cpu"] != "" {
+			return nil, fmt.Errorf("failed to parse instance '%s' cpu limit '%s': %w", item.Name, item.Config["limits.cpu"], err)
+		}
+
+		var memBytes int64
+		if memStr, ok := item.Config["limits.memory"]; ok && strings.TrimSpace(memStr) != "" {
+			var parseErr error
+			memBytes, parseErr = parseIncusByteSize(memStr)
+			if parseErr != nil {
+				return nil, fmt.Errorf("failed to parse instance '%s' memory limit '%s': %w", item.Name, memStr, parseErr)
+			}
+		}
+
+		diskBytes := extractStorageBytes(item)
 
 		createdTime, _ := time.Parse(time.RFC3339, item.Created)
 
@@ -376,6 +390,7 @@ func (p *IncusProvider) ListInstances(ctx context.Context) ([]interfaces.Instanc
 			Limits: interfaces.ResourceLimits{
 				CPUCores:    cores,
 				MemoryBytes: memBytes,
+				DiskBytes:   diskBytes,
 			},
 			Labels:    labels,
 			CreatedAt: createdTime,
@@ -860,4 +875,137 @@ func isInternalBridge(ifaceName string) bool {
 		strings.HasPrefix(lower, "br-") || strings.HasPrefix(lower, "veth") ||
 		strings.HasPrefix(lower, "kube") || strings.HasPrefix(lower, "virbr") ||
 		strings.HasPrefix(lower, "dummy")
+}
+
+func parseIncusByteSize(val string) (int64, error) {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return 0, nil
+	}
+
+	if bytesVal, err := strconv.ParseInt(val, 10, 64); err == nil {
+		if bytesVal < 0 {
+			return 0, fmt.Errorf("byte size cannot be negative: %s", val)
+		}
+		return bytesVal, nil
+	}
+
+	upper := strings.ToUpper(val)
+	idx := 0
+	for idx < len(upper) && ((upper[idx] >= '0' && upper[idx] <= '9') || upper[idx] == '.') {
+		idx++
+	}
+	numStr := upper[:idx]
+	unit := strings.TrimSpace(upper[idx:])
+
+	if numStr == "" {
+		return 0, fmt.Errorf("invalid byte size format '%s'", val)
+	}
+
+	floatVal, err := strconv.ParseFloat(numStr, 64)
+	if err != nil || floatVal < 0 {
+		return 0, fmt.Errorf("invalid numeric portion in byte size '%s'", val)
+	}
+
+	var multiplier float64
+	switch unit {
+	case "B", "":
+		multiplier = 1
+	case "K", "KB", "KIB":
+		if unit == "KB" {
+			multiplier = 1000
+		} else {
+			multiplier = 1024
+		}
+	case "M", "MB", "MIB":
+		if unit == "MB" {
+			multiplier = 1000 * 1000
+		} else {
+			multiplier = 1024 * 1024
+		}
+	case "G", "GB", "GIB":
+		if unit == "GB" {
+			multiplier = 1000 * 1000 * 1000
+		} else {
+			multiplier = 1024 * 1024 * 1024
+		}
+	case "T", "TB", "TIB":
+		if unit == "TB" {
+			multiplier = 1000 * 1000 * 1000 * 1000
+		} else {
+			multiplier = 1024 * 1024 * 1024 * 1024
+		}
+	default:
+		return 0, fmt.Errorf("unrecognized byte unit '%s' in value '%s'", unit, val)
+	}
+
+	return int64(floatVal * multiplier), nil
+}
+
+func parseIncusCPULimit(val string) (int, error) {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return 0, nil
+	}
+
+	if cores, err := strconv.Atoi(val); err == nil {
+		if cores <= 0 {
+			return 0, fmt.Errorf("cpu limit must be positive: %s", val)
+		}
+		return cores, nil
+	}
+
+	if strings.Contains(val, "-") {
+		parts := strings.Split(val, "-")
+		if len(parts) == 2 {
+			start, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+			end, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+			if err1 == nil && err2 == nil && end >= start {
+				return (end - start) + 1, nil
+			}
+		}
+	}
+
+	if strings.Contains(val, ",") {
+		parts := strings.Split(val, ",")
+		validCount := 0
+		for _, p := range parts {
+			if _, err := strconv.Atoi(strings.TrimSpace(p)); err == nil {
+				validCount++
+			}
+		}
+		if validCount > 0 {
+			return validCount, nil
+		}
+	}
+
+	return 0, fmt.Errorf("invalid CPU limit format '%s'", val)
+}
+
+func extractStorageBytes(item incusRawInstance) int64 {
+	checkDevices := func(devMap map[string]incusDevice) int64 {
+		for key, dev := range devMap {
+			if dev.Type == "disk" || key == "root" {
+				if dev.Size != "" {
+					if bytes, err := parseIncusByteSize(dev.Size); err == nil && bytes > 0 {
+						return bytes
+					}
+				}
+			}
+		}
+		return 0
+	}
+
+	if bytes := checkDevices(item.ExpandedDevices); bytes > 0 {
+		return bytes
+	}
+	if bytes := checkDevices(item.Devices); bytes > 0 {
+		return bytes
+	}
+	if sz, ok := item.Config["root.size"]; ok && sz != "" {
+		if bytes, err := parseIncusByteSize(sz); err == nil && bytes > 0 {
+			return bytes
+		}
+	}
+	return 0
 }

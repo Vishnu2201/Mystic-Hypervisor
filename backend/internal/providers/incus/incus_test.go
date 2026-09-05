@@ -423,3 +423,125 @@ func TestIncusProviderAdoptInstance(t *testing.T) {
 		t.Errorf("Expected config set user.mystic.workload_id wl-9999 to be executed")
 	}
 }
+
+func TestParseIncusByteSize(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected int64
+		wantErr  bool
+	}{
+		{"3GiB", 3 * 1024 * 1024 * 1024, false},
+		{"512MiB", 512 * 1024 * 1024, false},
+		{"1GiB", 1 * 1024 * 1024 * 1024, false},
+		{"4096MiB", 4096 * 1024 * 1024, false},
+		{"4GB", 4000000000, false},
+		{"512MB", 512000000, false},
+		{"3221225472", 3221225472, false},
+		{"", 0, false},
+		{"invalid-unit-xyz", 0, true},
+		{"-500MB", 0, true},
+	}
+
+	for _, tt := range tests {
+		got, err := parseIncusByteSize(tt.input)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("parseIncusByteSize(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			continue
+		}
+		if got != tt.expected {
+			t.Errorf("parseIncusByteSize(%q) = %d, expected %d", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestParseIncusCPULimit(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected int
+		wantErr  bool
+	}{
+		{"1", 1, false},
+		{"4", 4, false},
+		{"0-3", 4, false},
+		{"0,2,4", 3, false},
+		{"", 0, false},
+		{"invalid-cpu", 0, true},
+		{"-2", 0, true},
+	}
+
+	for _, tt := range tests {
+		got, err := parseIncusCPULimit(tt.input)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("parseIncusCPULimit(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			continue
+		}
+		if got != tt.expected {
+			t.Errorf("parseIncusCPULimit(%q) = %d, expected %d", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestIncusListInstancesMemoryParsing(t *testing.T) {
+	p := NewIncusProvider("")
+	p.SetExecRunner(func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		cmdStr := strings.Join(args, " ")
+		switch {
+		case strings.Contains(cmdStr, "version"):
+			return []byte("6.0.4"), nil
+		case strings.Contains(cmdStr, "list --format json"):
+			return []byte(`[
+				{
+					"name": "nano-3gib",
+					"status": "Running",
+					"type": "container",
+					"config": {
+						"limits.cpu": "1",
+						"limits.memory": "3GiB"
+					}
+				}
+			]`), nil
+		default:
+			return []byte("{}"), nil
+		}
+	})
+
+	insts, err := p.ListInstances(context.Background())
+	if err != nil {
+		t.Fatalf("ListInstances failed: %v", err)
+	}
+	if len(insts) != 1 {
+		t.Fatalf("Expected 1 instance, got %d", len(insts))
+	}
+	if insts[0].Limits.MemoryBytes != 3*1024*1024*1024 {
+		t.Errorf("Expected 3GiB (%d bytes), got %d bytes", 3*1024*1024*1024, insts[0].Limits.MemoryBytes)
+	}
+}
+
+func TestIncusListInstancesInvalidMemoryReturnsError(t *testing.T) {
+	p := NewIncusProvider("")
+	p.SetExecRunner(func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		cmdStr := strings.Join(args, " ")
+		switch {
+		case strings.Contains(cmdStr, "version"):
+			return []byte("6.0.4"), nil
+		case strings.Contains(cmdStr, "list --format json"):
+			return []byte(`[
+				{
+					"name": "bad-mem",
+					"status": "Running",
+					"type": "container",
+					"config": {
+						"limits.memory": "unparseable-xyz"
+					}
+				}
+			]`), nil
+		default:
+			return []byte("{}"), nil
+		}
+	})
+
+	_, err := p.ListInstances(context.Background())
+	if err == nil {
+		t.Fatalf("Expected ListInstances to fail on unparseable memory limit, got nil error")
+	}
+}

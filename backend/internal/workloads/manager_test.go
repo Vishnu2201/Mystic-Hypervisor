@@ -940,3 +940,106 @@ func TestRecoveryOfUntrackedTaggedInstance(t *testing.T) {
 		t.Errorf("Expected restored workload test-nano / RUNNING, got %+v", restoredW)
 	}
 }
+
+func TestAdoptionImports3GiBMemoryLimit(t *testing.T) {
+	ctx := context.Background()
+	tp := NewTestProvider()
+	tp.instances["test-nano-3gib"] = &interfaces.Instance{
+		ID:       "test-nano-3gib",
+		Name:     "test-nano-3gib",
+		Type:     interfaces.InstanceTypeContainer,
+		State:    interfaces.StateRunning,
+		Provider: "incus",
+		Limits: interfaces.ResourceLimits{
+			CPUCores:    1,
+			MemoryBytes: 3 * 1024 * 1024 * 1024, // 3GiB = 3221225472 bytes
+		},
+	}
+
+	mgr := NewManagerWithProvider(tp)
+	w, err := mgr.AdoptWorkload(ctx, "test-nano-3gib")
+	if err != nil {
+		t.Fatalf("AdoptWorkload failed: %v", err)
+	}
+
+	if w.MemoryMB != 3072 {
+		t.Errorf("Expected adopted workload MemoryMB == 3072 for 3GiB limit, got %d", w.MemoryMB)
+	}
+}
+
+func TestAdoptionImportsVariousMemoryUnits(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name       string
+		bytes      int64
+		expectedMB int64
+	}{
+		{"512mib-inst", 512 * 1024 * 1024, 512},
+		{"1gib-inst", 1 * 1024 * 1024 * 1024, 1024},
+		{"4096mib-inst", 4096 * 1024 * 1024, 4096},
+	}
+
+	for _, tt := range tests {
+		tp := NewTestProvider()
+		tp.instances[tt.name] = &interfaces.Instance{
+			ID:       tt.name,
+			Name:     tt.name,
+			Type:     interfaces.InstanceTypeContainer,
+			State:    interfaces.StateRunning,
+			Provider: "incus",
+			Limits: interfaces.ResourceLimits{
+				CPUCores:    2,
+				MemoryBytes: tt.bytes,
+			},
+		}
+
+		mgr := NewManagerWithProvider(tp)
+		w, err := mgr.AdoptWorkload(ctx, tt.name)
+		if err != nil {
+			t.Fatalf("AdoptWorkload for %s failed: %v", tt.name, err)
+		}
+		if w.MemoryMB != tt.expectedMB {
+			t.Errorf("For %s expected MemoryMB == %d, got %d", tt.name, tt.expectedMB, w.MemoryMB)
+		}
+	}
+}
+
+func TestAdoptionRegressionNoFallbackWhenValidMemoryPresent(t *testing.T) {
+	ctx := context.Background()
+	tp := NewTestProvider()
+	tp.instances["valid-mem-inst"] = &interfaces.Instance{
+		ID:       "valid-mem-inst",
+		Name:     "valid-mem-inst",
+		Type:     interfaces.InstanceTypeContainer,
+		State:    interfaces.StateRunning,
+		Provider: "incus",
+		Limits: interfaces.ResourceLimits{
+			CPUCores:    1,
+			MemoryBytes: 3 * 1024 * 1024 * 1024, // 3GiB
+		},
+	}
+
+	mgr := NewManagerWithProvider(tp)
+
+	// Verify adoption preview does not display 512MB fallback
+	prev, err := mgr.GetAdoptionPreview(ctx, "valid-mem-inst")
+	if err != nil {
+		t.Fatalf("GetAdoptionPreview failed: %v", err)
+	}
+	if prev.MemoryBytes != 3*1024*1024*1024 {
+		t.Errorf("Adoption preview regression: expected 3GiB (%d bytes), got %d bytes", 3*1024*1024*1024, prev.MemoryBytes)
+	}
+
+	// Verify AdoptWorkload does not set 512MB fallback
+	w, err := mgr.AdoptWorkload(ctx, "valid-mem-inst")
+	if err != nil {
+		t.Fatalf("AdoptWorkload failed: %v", err)
+	}
+	if w.MemoryMB == 512 {
+		t.Fatalf("REGRESSION DETECTED: AdoptWorkload silently fell back to 512MB when valid 3GiB memory limit was present!")
+	}
+	if w.MemoryMB != 3072 {
+		t.Errorf("Expected MemoryMB == 3072, got %d", w.MemoryMB)
+	}
+}

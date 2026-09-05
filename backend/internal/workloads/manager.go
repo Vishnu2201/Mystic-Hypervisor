@@ -228,6 +228,11 @@ func (m *Manager) AdoptWorkload(ctx context.Context, name string) (*Workload, er
 		memMB = 512
 	}
 
+	storageGB := inst.Limits.DiskBytes / (1024 * 1024 * 1024)
+	if storageGB <= 0 {
+		storageGB = 10
+	}
+
 	imgName := "adopted-external"
 	if inst.Labels != nil && inst.Labels["image"] != "" {
 		imgName = inst.Labels["image"]
@@ -246,7 +251,7 @@ func (m *Manager) AdoptWorkload(ctx context.Context, name string) (*Workload, er
 		SyncStatus:         instances.SyncInSync,
 		CPU:                cpuCores,
 		MemoryMB:           memMB,
-		StorageGB:          10,
+		StorageGB:          storageGB,
 		Image:              imgName,
 		Project:            "default",
 		Profile:            "default",
@@ -341,6 +346,11 @@ func (m *Manager) GetAdoptionPreview(ctx context.Context, name string) (*Adoptio
 		memBytes = 512 * 1024 * 1024
 	}
 
+	storageGB := inst.Limits.DiskBytes / (1024 * 1024 * 1024)
+	if storageGB <= 0 {
+		storageGB = 10
+	}
+
 	imgName := "adopted-external"
 	if inst.Labels != nil && inst.Labels["image"] != "" {
 		imgName = inst.Labels["image"]
@@ -359,7 +369,7 @@ func (m *Manager) GetAdoptionPreview(ctx context.Context, name string) (*Adoptio
 		IPAddress:      inst.IPAddress,
 		CPUCores:       cpuCores,
 		MemoryBytes:    memBytes,
-		StorageGB:      10,
+		StorageGB:      storageGB,
 		Image:          imgName,
 		Network:        "incusbr0",
 		Ownership:      ownership,
