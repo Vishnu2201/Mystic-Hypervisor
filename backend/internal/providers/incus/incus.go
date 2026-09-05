@@ -99,18 +99,24 @@ func (p *IncusProvider) NetworkProvider() (interfaces.NetworkProvider, bool) {
 }
 
 // Raw JSON structures returned by Incus CLI queries
+type incusRawServerEnvironment struct {
+	Addresses     []string `json:"addresses"`
+	Architecture  string   `json:"architecture"`
+	Architectures []string `json:"architectures"`
+	Driver        string   `json:"driver"`
+	KernelVersion string   `json:"kernel_version"`
+	OSName        string   `json:"os_name"`
+	OSVersion     string   `json:"os_version"`
+	ServerVersion string   `json:"server_version"`
+	Storage       string   `json:"storage"`
+	StorageDriver string   `json:"storage_driver"`
+}
+
 type incusRawServerInfo struct {
-	Environment struct {
-		Addresses     []string `json:"addresses"`
-		Architecture  string   `json:"architecture"`
-		Driver        string   `json:"driver"`
-		KernelVersion string   `json:"kernel_version"`
-		OSName        string   `json:"os_name"`
-		OSVersion     string   `json:"os_version"`
-		ServerVersion string   `json:"server_version"`
-		Storage       string   `json:"storage"`
-		StorageDriver string   `json:"storage_driver"`
-	} `json:"environment"`
+	Environment incusRawServerEnvironment `json:"environment"`
+	Metadata    struct {
+		Environment incusRawServerEnvironment `json:"environment"`
+	} `json:"metadata"`
 }
 
 type incusRawInstance struct {
@@ -188,8 +194,8 @@ func (p *IncusProvider) Preflight(ctx context.Context) (*interfaces.ProviderPref
 	}
 	res.HealthStatus.Installed = true
 
-	// 2. Reachable Check (incus info --format json)
-	infoBytes, err := p.runCmd(ctx, "incus", "info", "--format", "json")
+	// 2. Reachable Check (incus query /1.0 API endpoint)
+	infoBytes, err := p.runCmd(ctx, "incus", "query", "/1.0")
 	if err != nil {
 		res.Blockers = append(res.Blockers, fmt.Sprintf("Incus daemon is unreachable or socket error: %v", err))
 		return res, nil
@@ -198,13 +204,21 @@ func (p *IncusProvider) Preflight(ctx context.Context) (*interfaces.ProviderPref
 
 	var rawInfo incusRawServerInfo
 	if err := json.Unmarshal(infoBytes, &rawInfo); err == nil {
-		osStr := strings.TrimSpace(fmt.Sprintf("%s %s", rawInfo.Environment.OSName, rawInfo.Environment.OSVersion))
+		env := rawInfo.Environment
+		if env.ServerVersion == "" && env.OSName == "" {
+			env = rawInfo.Metadata.Environment
+		}
+		osStr := strings.TrimSpace(fmt.Sprintf("%s %s", env.OSName, env.OSVersion))
+		archStr := env.Architecture
+		if archStr == "" && len(env.Architectures) > 0 {
+			archStr = env.Architectures[0]
+		}
 		res.ServerInfo = interfaces.ProviderServerInfo{
-			ServerVersion: rawInfo.Environment.ServerVersion,
+			ServerVersion: env.ServerVersion,
 			OS:            osStr,
-			Kernel:        rawInfo.Environment.KernelVersion,
-			Architecture:  rawInfo.Environment.Architecture,
-			KVMSupported:  rawInfo.Environment.Driver == "qemu" || rawInfo.Environment.Driver == "kvm",
+			Kernel:        env.KernelVersion,
+			Architecture:  archStr,
+			KVMSupported:  env.Driver == "qemu" || env.Driver == "kvm",
 		}
 	}
 

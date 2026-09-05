@@ -36,16 +36,21 @@ func TestIncusProviderPreflightDiscovery(t *testing.T) {
 	p.SetExecRunner(func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		cmdStr := strings.Join(args, " ")
 		switch {
-		case strings.Contains(cmdStr, "info --format json"):
+		case strings.Contains(cmdStr, "query /1.0"):
 			return []byte(`{
-				"environment": {
-					"addresses": ["10.0.0.250:8443"],
-					"architecture": "x86_64",
-					"driver": "qemu",
-					"kernel_version": "6.12.38+deb13-cloud-amd64",
-					"os_name": "Debian GNU/Linux",
-					"os_version": "13 (trixie)",
-					"server_version": "6.0.4"
+				"type": "sync",
+				"status": "Success",
+				"status_code": 200,
+				"metadata": {
+					"environment": {
+						"addresses": ["10.0.0.250:8443"],
+						"architecture": "x86_64",
+						"driver": "qemu",
+						"kernel_version": "6.12.38+deb13-cloud-amd64",
+						"os_name": "Debian GNU/Linux",
+						"os_version": "13 (trixie)",
+						"server_version": "6.0.4"
+					}
 				}
 			}`), nil
 		case strings.Contains(cmdStr, "network list"):
@@ -144,5 +149,57 @@ func TestIncusProviderPreflightDiscovery(t *testing.T) {
 	// Verify existing external resource warning
 	if len(res.Warnings) == 0 {
 		t.Errorf("Expected warning for external resources detected")
+	}
+}
+
+func TestIncusProviderPreflightIncus6DirectResponse(t *testing.T) {
+	p := NewIncusProvider("")
+	p.SetExecRunner(func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		cmdStr := strings.Join(args, " ")
+		switch {
+		case strings.Contains(cmdStr, "query /1.0"):
+			return []byte(`{
+				"api_status": "stable",
+				"api_version": "1.0",
+				"auth": "trusted",
+				"environment": {
+					"architectures": ["x86_64", "i686"],
+					"driver": "lxc",
+					"driver_version": "6.0.4",
+					"kernel_version": "6.12.38+deb13-cloud-amd64",
+					"os_name": "Debian GNU/Linux",
+					"os_version": "13",
+					"server_name": "mysticservers",
+					"server_version": "6.0.4",
+					"storage": "dir"
+				}
+			}`), nil
+		default:
+			return []byte("[]"), nil
+		}
+	})
+
+	res, err := p.Preflight(context.Background())
+	if err != nil {
+		t.Fatalf("Preflight failed: %v", err)
+	}
+
+	if res.Availability != interfaces.AvailabilityAvailable {
+		t.Errorf("Expected Availability AVAILABLE, got %s", res.Availability)
+	}
+	if !res.HealthStatus.Installed || !res.HealthStatus.Reachable || !res.HealthStatus.Operational || !res.HealthStatus.Capable {
+		t.Errorf("Expected all health flags true, got %+v", res.HealthStatus)
+	}
+	if res.ServerInfo.ServerVersion != "6.0.4" {
+		t.Errorf("Expected ServerVersion 6.0.4, got %s", res.ServerInfo.ServerVersion)
+	}
+	if res.ServerInfo.OS != "Debian GNU/Linux 13" {
+		t.Errorf("Expected OS 'Debian GNU/Linux 13', got '%s'", res.ServerInfo.OS)
+	}
+	if res.ServerInfo.Architecture != "x86_64" {
+		t.Errorf("Expected Architecture 'x86_64', got '%s'", res.ServerInfo.Architecture)
+	}
+	if res.ServerInfo.KVMSupported {
+		t.Errorf("Expected KVMSupported false for LXC driver, got true")
 	}
 }
