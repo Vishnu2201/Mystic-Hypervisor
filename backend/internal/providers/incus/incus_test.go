@@ -203,3 +203,163 @@ func TestIncusProviderPreflightIncus6DirectResponse(t *testing.T) {
 		t.Errorf("Expected KVMSupported false for LXC driver, got true")
 	}
 }
+
+func TestExtractPrimaryIP(t *testing.T) {
+	// a. Instance with eth0 on incusbr0 (10.170.92.70) and docker0 (172.17.0.1) -> expect 10.170.92.70
+	t.Run("IncusNicVsDocker0", func(t *testing.T) {
+		inst := incusRawInstance{
+			Name: "test-nano",
+			ExpandedDevices: map[string]incusDevice{
+				"eth0": {Type: "nic", Name: "eth0", Network: "incusbr0"},
+			},
+		}
+		inst.State.Network = map[string]struct {
+			Addresses []struct {
+				Family  string `json:"family"`
+				Address string `json:"address"`
+				Scope   string `json:"scope"`
+			} `json:"addresses"`
+		}{
+			"docker0": {
+				Addresses: []struct {
+					Family  string `json:"family"`
+					Address string `json:"address"`
+					Scope   string `json:"scope"`
+				}{
+					{Family: "inet", Address: "172.17.0.1", Scope: "global"},
+				},
+			},
+			"eth0": {
+				Addresses: []struct {
+					Family  string `json:"family"`
+					Address string `json:"address"`
+					Scope   string `json:"scope"`
+				}{
+					{Family: "inet", Address: "10.170.92.70", Scope: "global"},
+				},
+			},
+			"lo": {
+				Addresses: []struct {
+					Family  string `json:"family"`
+					Address string `json:"address"`
+					Scope   string `json:"scope"`
+				}{
+					{Family: "inet", Address: "127.0.0.1", Scope: "local"},
+				},
+			},
+		}
+
+		ip := extractPrimaryIP(inst)
+		if ip != "10.170.92.70" {
+			t.Errorf("Expected primary IP 10.170.92.70, got %s", ip)
+		}
+	})
+
+	// b. Instance with custom non-eth0 Incus-connected interface (e.g. net0 with 10.0.0.55) -> expect 10.0.0.55
+	t.Run("CustomNicNameIncusConnected", func(t *testing.T) {
+		inst := incusRawInstance{
+			Name: "custom-net-inst",
+			ExpandedDevices: map[string]incusDevice{
+				"net0": {Type: "nic", Name: "net0", Network: "custombr0"},
+			},
+		}
+		inst.State.Network = map[string]struct {
+			Addresses []struct {
+				Family  string `json:"family"`
+				Address string `json:"address"`
+				Scope   string `json:"scope"`
+			} `json:"addresses"`
+		}{
+			"docker0": {
+				Addresses: []struct {
+					Family  string `json:"family"`
+					Address string `json:"address"`
+					Scope   string `json:"scope"`
+				}{
+					{Family: "inet", Address: "172.18.0.1", Scope: "global"},
+				},
+			},
+			"net0": {
+				Addresses: []struct {
+					Family  string `json:"family"`
+					Address string `json:"address"`
+					Scope   string `json:"scope"`
+				}{
+					{Family: "inet", Address: "10.0.0.55", Scope: "global"},
+				},
+			},
+		}
+
+		ip := extractPrimaryIP(inst)
+		if ip != "10.0.0.55" {
+			t.Errorf("Expected primary IP 10.0.0.55, got %s", ip)
+		}
+	})
+
+	// c. Instance with single IPv4 address -> expected that address remains selected
+	t.Run("SingleIPv4Address", func(t *testing.T) {
+		inst := incusRawInstance{
+			Name: "single-ip-inst",
+		}
+		inst.State.Network = map[string]struct {
+			Addresses []struct {
+				Family  string `json:"family"`
+				Address string `json:"address"`
+				Scope   string `json:"scope"`
+			} `json:"addresses"`
+		}{
+			"eth0": {
+				Addresses: []struct {
+					Family  string `json:"family"`
+					Address string `json:"address"`
+					Scope   string `json:"scope"`
+				}{
+					{Family: "inet", Address: "192.168.1.100", Scope: "global"},
+				},
+			},
+		}
+
+		ip := extractPrimaryIP(inst)
+		if ip != "192.168.1.100" {
+			t.Errorf("Expected primary IP 192.168.1.100, got %s", ip)
+		}
+	})
+
+	// d. Instance without usable IPv4 addresses -> expected empty string
+	t.Run("NoUsableIPv4", func(t *testing.T) {
+		inst := incusRawInstance{
+			Name: "no-ip-inst",
+		}
+		inst.State.Network = map[string]struct {
+			Addresses []struct {
+				Family  string `json:"family"`
+				Address string `json:"address"`
+				Scope   string `json:"scope"`
+			} `json:"addresses"`
+		}{
+			"lo": {
+				Addresses: []struct {
+					Family  string `json:"family"`
+					Address string `json:"address"`
+					Scope   string `json:"scope"`
+				}{
+					{Family: "inet", Address: "127.0.0.1", Scope: "local"},
+				},
+			},
+			"eth0": {
+				Addresses: []struct {
+					Family  string `json:"family"`
+					Address string `json:"address"`
+					Scope   string `json:"scope"`
+				}{
+					{Family: "inet6", Address: "fe80::1", Scope: "link"},
+				},
+			},
+		}
+
+		ip := extractPrimaryIP(inst)
+		if ip != "" {
+			t.Errorf("Expected empty primary IP, got %s", ip)
+		}
+	})
+}

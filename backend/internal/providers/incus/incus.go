@@ -5,6 +5,7 @@ import "context"
 import "encoding/json"
 import "fmt"
 import "os/exec"
+import "sort"
 import "strconv"
 import "strings"
 import "time"
@@ -119,11 +120,20 @@ type incusRawServerInfo struct {
 	} `json:"metadata"`
 }
 
+type incusDevice struct {
+	Type    string `json:"type"`
+	Name    string `json:"name"`
+	Network string `json:"network"`
+	Parent  string `json:"parent"`
+}
+
 type incusRawInstance struct {
-	Name   string `json:"name"`
-	Status string `json:"status"`
-	Type   string `json:"type"`
-	State  struct {
+	Name            string                 `json:"name"`
+	Status          string                 `json:"status"`
+	Type            string                 `json:"type"`
+	Devices         map[string]incusDevice `json:"devices"`
+	ExpandedDevices map[string]incusDevice `json:"expanded_devices"`
+	State           struct {
 		Status     string `json:"status"`
 		StatusCode int    `json:"status_code"`
 		Network    map[string]struct {
@@ -723,13 +733,100 @@ func parseIncusState(status string) interfaces.InstanceState {
 	}
 }
 
+type ipCandidate struct {
+	ifaceName string
+	ip        string
+	score     int
+}
+
 func extractPrimaryIP(item incusRawInstance) string {
-	for _, netObj := range item.State.Network {
-		for _, addr := range netObj.Addresses {
-			if addr.Family == "inet" && addr.Scope == "global" {
-				return addr.Address
+	// Build map of configured Incus NIC devices
+	incusNics := make(map[string]bool) // ifaceName -> hasIncusNetwork
+
+	checkDeviceMap := func(devMap map[string]incusDevice) {
+		for key, dev := range devMap {
+			if dev.Type == "nic" || dev.Type == "" {
+				iface := dev.Name
+				if iface == "" {
+					iface = key
+				}
+				hasNet := dev.Network != "" || dev.Parent != ""
+				if currentHasNet, exists := incusNics[iface]; exists {
+					incusNics[iface] = currentHasNet || hasNet
+				} else {
+					incusNics[iface] = hasNet
+				}
 			}
 		}
 	}
-	return ""
+
+	checkDeviceMap(item.ExpandedDevices)
+	checkDeviceMap(item.Devices)
+
+	var candidates []ipCandidate
+
+	for ifaceName, netObj := range item.State.Network {
+		if ifaceName == "lo" {
+			continue
+		}
+		for _, addr := range netObj.Addresses {
+			if addr.Family != "inet" || addr.Scope == "local" || strings.HasPrefix(addr.Address, "127.") {
+				continue
+			}
+
+			score := 0
+			hasNet, isConfiguredNic := incusNics[ifaceName]
+			if isConfiguredNic {
+				if hasNet {
+					score = 100 // Incus-configured NIC connected to Incus network/bridge
+				} else {
+					score = 80 // Incus-configured NIC device
+				}
+			} else if isStandardIface(ifaceName) && !isInternalBridge(ifaceName) {
+				score = 60 // Standard interface name (eth*, en*, net*) and not internal bridge
+			} else if !isInternalBridge(ifaceName) {
+				score = 40 // Non-bridge interface
+			} else {
+				score = 20 // Internal container/bridge interface (docker0, cni0, etc.)
+			}
+
+			candidates = append(candidates, ipCandidate{
+				ifaceName: ifaceName,
+				ip:        addr.Address,
+				score:     score,
+			})
+		}
+	}
+
+	if len(candidates) == 0 {
+		return ""
+	}
+
+	// Sort candidates by score desc, ifaceName asc, ip asc
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].score != candidates[j].score {
+			return candidates[i].score > candidates[j].score
+		}
+		if candidates[i].ifaceName != candidates[j].ifaceName {
+			return candidates[i].ifaceName < candidates[j].ifaceName
+		}
+		return candidates[i].ip < candidates[j].ip
+	})
+
+	return candidates[0].ip
+}
+
+func isStandardIface(ifaceName string) bool {
+	lower := strings.ToLower(ifaceName)
+	return strings.HasPrefix(lower, "eth") || strings.HasPrefix(lower, "en") ||
+		strings.HasPrefix(lower, "wl") || strings.HasPrefix(lower, "net")
+}
+
+func isInternalBridge(ifaceName string) bool {
+	lower := strings.ToLower(ifaceName)
+	return lower == "docker0" || strings.HasPrefix(lower, "docker") ||
+		strings.HasPrefix(lower, "cni") || strings.HasPrefix(lower, "flannel") ||
+		strings.HasPrefix(lower, "br-") || strings.HasPrefix(lower, "veth") ||
+		strings.HasPrefix(lower, "kube") || strings.HasPrefix(lower, "virbr") ||
+		strings.HasPrefix(lower, "dummy")
 }
