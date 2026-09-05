@@ -8,12 +8,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mystic-hypervisor/mystic/backend/internal/connections"
 	"github.com/mystic-hypervisor/mystic/backend/internal/hosts"
 	"github.com/mystic-hypervisor/mystic/backend/internal/instances"
 	"github.com/mystic-hypervisor/mystic/backend/internal/logging"
 	"github.com/mystic-hypervisor/mystic/backend/internal/networking"
 	"github.com/mystic-hypervisor/mystic/backend/internal/providers/incus"
 	"github.com/mystic-hypervisor/mystic/backend/internal/providers/interfaces"
+	"github.com/mystic-hypervisor/mystic/backend/internal/services"
 )
 
 // Manager implements WorkloadService and manages real workload lifecycle.
@@ -26,10 +28,28 @@ type Manager struct {
 	reconciler       *instances.Reconciler
 	guard            *ExecutionGuard
 	store            Store
+	exposureMgr      *networking.ExposureManager
+	serviceMgr       *services.ServiceManager
+	connMgr          *connections.ConnectionManager
 	reconcileStop    chan struct{}
 	reconcileDone    chan struct{}
 	reconcileRunning bool
 	reconcileMu      sync.Mutex
+}
+
+// ExposureManager returns the attached network exposure manager instance.
+func (m *Manager) ExposureManager() *networking.ExposureManager {
+	return m.exposureMgr
+}
+
+// ServiceManager returns the attached service manager instance.
+func (m *Manager) ServiceManager() *services.ServiceManager {
+	return m.serviceMgr
+}
+
+// ConnectionManager returns the attached connection profile manager instance.
+func (m *Manager) ConnectionManager() *connections.ConnectionManager {
+	return m.connMgr
 }
 
 // StorePath returns the filesystem path of the workload store if using FileStore.
@@ -52,6 +72,13 @@ func NewManagerWithProvider(provider interfaces.Provider) *Manager {
 
 // NewManagerWithProviderAndStore constructs a WorkloadManager with provider and persistent store.
 func NewManagerWithProviderAndStore(provider interfaces.Provider, store Store) *Manager {
+	expStore := networking.NewFileExposureStore("")
+	expMgr := networking.NewExposureManager(expStore, nil)
+	svcStore := services.NewFileServiceStore("")
+	svcMgr := services.NewServiceManager(svcStore, expMgr)
+	connStore := connections.NewFileConnectionStore("")
+	connMgr := connections.NewConnectionManager(connStore, svcMgr, expMgr)
+
 	m := &Manager{
 		workloads:   make(map[string]*Workload),
 		plans:       make(map[string]*ProvisioningPlan),
@@ -60,6 +87,9 @@ func NewManagerWithProviderAndStore(provider interfaces.Provider, store Store) *
 		reconciler:  instances.NewReconciler(),
 		guard:       NewExecutionGuard(15 * time.Second),
 		store:       store,
+		exposureMgr: expMgr,
+		serviceMgr:  svcMgr,
+		connMgr:     connMgr,
 	}
 
 	if m.store != nil {
@@ -74,6 +104,11 @@ func NewManagerWithProviderAndStore(provider interfaces.Provider, store Store) *
 		}
 		if loaded != nil {
 			m.workloads = loaded
+			for _, w := range m.workloads {
+				if len(w.NetworkConfig.ForwardingRules) > 0 {
+					m.exposureMgr.MigrateForwardingRules(w.ID, w.Name, w.NetworkConfig.ExposureMode, w.NetworkConfig.ForwardingRules)
+				}
+			}
 			logging.GetLogger().Info("Loaded persisted workloads from store",
 				"store_path", m.StorePath(),
 				"count", len(m.workloads),

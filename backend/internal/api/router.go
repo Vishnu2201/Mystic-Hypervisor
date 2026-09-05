@@ -11,9 +11,12 @@ import (
 	"time"
 
 	"github.com/mystic-hypervisor/mystic/backend/internal/config"
+	"github.com/mystic-hypervisor/mystic/backend/internal/connections"
 	"github.com/mystic-hypervisor/mystic/backend/internal/logging"
+	"github.com/mystic-hypervisor/mystic/backend/internal/networking"
 	"github.com/mystic-hypervisor/mystic/backend/internal/providers/incus"
 	"github.com/mystic-hypervisor/mystic/backend/internal/providers/interfaces"
+	"github.com/mystic-hypervisor/mystic/backend/internal/services"
 	"github.com/mystic-hypervisor/mystic/backend/internal/workloads"
 )
 
@@ -127,6 +130,33 @@ func (r *Router) registerRoutes() {
 	r.mux.HandleFunc("POST /api/v1/networks/rules/verify", r.handleVerifyForwardingRule)
 	r.mux.HandleFunc("GET /api/v1/users", r.handleUnimplemented)
 	r.mux.HandleFunc("GET /api/v1/audit", r.handleUnimplemented)
+
+	// Network Exposure Endpoints
+	r.mux.HandleFunc("GET /api/v1/network/exposures", r.handleListExposures)
+	r.mux.HandleFunc("GET /api/v1/network/exposures/{id}", r.handleGetExposure)
+	r.mux.HandleFunc("POST /api/v1/network/exposures", r.handleCreateExposure)
+	r.mux.HandleFunc("PATCH /api/v1/network/exposures/{id}", r.handleUpdateExposure)
+	r.mux.HandleFunc("DELETE /api/v1/network/exposures/{id}", r.handleDeleteExposure)
+	r.mux.HandleFunc("POST /api/v1/network/exposures/{id}/validate", r.handleValidateExposure)
+	r.mux.HandleFunc("POST /api/v1/network/exposures/{id}/reconcile", r.handleReconcileExposure)
+	r.mux.HandleFunc("GET /api/v1/workloads/{id}/exposures", r.handleWorkloadExposures)
+
+	// Service Endpoints
+	r.mux.HandleFunc("GET /api/v1/services", r.handleListServices)
+	r.mux.HandleFunc("POST /api/v1/services", r.handleCreateService)
+	r.mux.HandleFunc("GET /api/v1/services/{id}", r.handleGetService)
+	r.mux.HandleFunc("PATCH /api/v1/services/{id}", r.handleUpdateService)
+	r.mux.HandleFunc("DELETE /api/v1/services/{id}", r.handleDeleteService)
+	r.mux.HandleFunc("GET /api/v1/workloads/{id}/services", r.handleWorkloadServices)
+
+	// Connection Profile Endpoints
+	r.mux.HandleFunc("GET /api/v1/connections", r.handleListConnections)
+	r.mux.HandleFunc("POST /api/v1/connections", r.handleCreateConnection)
+	r.mux.HandleFunc("GET /api/v1/connections/{id}", r.handleGetConnection)
+	r.mux.HandleFunc("PATCH /api/v1/connections/{id}", r.handleUpdateConnection)
+	r.mux.HandleFunc("DELETE /api/v1/connections/{id}", r.handleDeleteConnection)
+	r.mux.HandleFunc("GET /api/v1/services/{id}/connections", r.handleServiceConnections)
+	r.mux.HandleFunc("POST /api/v1/services/{id}/connection-profile", r.handleGenerateServiceConnectionProfile)
 }
 
 func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
@@ -590,4 +620,368 @@ func (r *Router) handleUnimplemented(w http.ResponseWriter, req *http.Request) {
 func jsonResponse(w http.ResponseWriter, code int, data interface{}) {
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(data)
+}
+
+func jsonError(w http.ResponseWriter, code int, message string) {
+	jsonResponse(w, code, map[string]string{"error": message})
+}
+
+func (r *Router) handleListExposures(w http.ResponseWriter, req *http.Request) {
+	workloadID := req.URL.Query().Get("workload_id")
+	var list []networking.NetworkExposure
+	var err error
+	if workloadID != "" {
+		list, err = r.workloadManager.ExposureManager().ListWorkloadExposures(req.Context(), workloadID)
+	} else {
+		list, err = r.workloadManager.ExposureManager().ListNetworkExposures(req.Context())
+	}
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"exposures": list})
+}
+
+func (r *Router) handleGetExposure(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/network/exposures/")
+	exp, err := r.workloadManager.ExposureManager().GetNetworkExposure(req.Context(), id)
+	if err != nil {
+		if errors.Is(err, networking.ErrExposureNotFound) {
+			jsonResponse(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"exposure": exp})
+}
+
+func (r *Router) handleCreateExposure(w http.ResponseWriter, req *http.Request) {
+	var exp networking.NetworkExposure
+	if err := json.NewDecoder(req.Body).Decode(&exp); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid request JSON body"})
+		return
+	}
+
+	created, err := r.workloadManager.ExposureManager().CreateNetworkExposure(req.Context(), &exp)
+	if err != nil {
+		if errors.Is(err, networking.ErrExposureConflict) || errors.Is(err, networking.ErrInvalidExposure) {
+			jsonResponse(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusCreated, map[string]interface{}{
+		"exposure": created,
+		"message":  "Network exposure created successfully.",
+	})
+}
+
+func (r *Router) handleUpdateExposure(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/network/exposures/")
+	var exp networking.NetworkExposure
+	if err := json.NewDecoder(req.Body).Decode(&exp); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid request JSON body"})
+		return
+	}
+
+	updated, err := r.workloadManager.ExposureManager().UpdateNetworkExposure(req.Context(), id, &exp)
+	if err != nil {
+		if errors.Is(err, networking.ErrExposureNotFound) {
+			jsonResponse(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, networking.ErrExposureConflict) {
+			jsonResponse(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"exposure": updated,
+		"message":  "Network exposure updated successfully.",
+	})
+}
+
+func (r *Router) handleDeleteExposure(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/network/exposures/")
+	if err := r.workloadManager.ExposureManager().DeleteNetworkExposure(req.Context(), id); err != nil {
+		if errors.Is(err, networking.ErrExposureNotFound) {
+			jsonResponse(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]string{"message": "Network exposure deleted cleanly."})
+}
+
+func (r *Router) handleValidateExposure(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/network/exposures/")
+	id = strings.TrimSuffix(id, "/validate")
+
+	exp, err := r.workloadManager.ExposureManager().GetNetworkExposure(req.Context(), id)
+	if err != nil {
+		jsonResponse(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+
+	res, err := r.workloadManager.ExposureManager().ValidateNetworkExposure(req.Context(), exp)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"validation_result": res})
+}
+
+func (r *Router) handleReconcileExposure(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/network/exposures/")
+	id = strings.TrimSuffix(id, "/reconcile")
+
+	exp, err := r.workloadManager.ExposureManager().ReconcileExposure(req.Context(), id)
+	if err != nil {
+		jsonResponse(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"exposure": exp})
+}
+
+func (r *Router) handleWorkloadExposures(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/workloads/")
+	id = strings.TrimSuffix(id, "/exposures")
+
+	list, err := r.workloadManager.ExposureManager().ListWorkloadExposures(req.Context(), id)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"exposures": list})
+}
+
+// --- SERVICES HANDLERS ---
+
+func (r *Router) handleListServices(w http.ResponseWriter, req *http.Request) {
+	svcs, err := r.workloadManager.ServiceManager().ListServices(req.Context())
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"services": svcs, "count": len(svcs)})
+}
+
+func (r *Router) handleCreateService(w http.ResponseWriter, req *http.Request) {
+	var svc services.Service
+	if err := json.NewDecoder(req.Body).Decode(&svc); err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+	created, err := r.workloadManager.ServiceManager().CreateService(req.Context(), &svc)
+	if err != nil {
+		if errors.Is(err, services.ErrInvalidService) {
+			jsonError(w, http.StatusBadRequest, err.Error())
+		} else if errors.Is(err, services.ErrServiceConflict) {
+			jsonError(w, http.StatusConflict, err.Error())
+		} else {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	jsonResponse(w, http.StatusCreated, map[string]interface{}{"service": created})
+}
+
+func (r *Router) handleGetService(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/services/")
+	svc, err := r.workloadManager.ServiceManager().GetService(req.Context(), id)
+	if err != nil {
+		if errors.Is(err, services.ErrServiceNotFound) {
+			jsonError(w, http.StatusNotFound, err.Error())
+		} else {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"service": svc})
+}
+
+func (r *Router) handleUpdateService(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/services/")
+	var updated services.Service
+	if err := json.NewDecoder(req.Body).Decode(&updated); err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+	svc, err := r.workloadManager.ServiceManager().UpdateService(req.Context(), id, &updated)
+	if err != nil {
+		if errors.Is(err, services.ErrServiceNotFound) {
+			jsonError(w, http.StatusNotFound, err.Error())
+		} else if errors.Is(err, services.ErrInvalidService) {
+			jsonError(w, http.StatusBadRequest, err.Error())
+		} else {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"service": svc})
+}
+
+func (r *Router) handleDeleteService(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/services/")
+	if err := r.workloadManager.ServiceManager().DeleteService(req.Context(), id); err != nil {
+		if errors.Is(err, services.ErrServiceNotFound) {
+			jsonError(w, http.StatusNotFound, err.Error())
+		} else {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]string{"message": "Service deleted cleanly"})
+}
+
+func (r *Router) handleWorkloadServices(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/workloads/")
+	id = strings.TrimSuffix(id, "/services")
+
+	svcs, err := r.workloadManager.ServiceManager().ListWorkloadServices(req.Context(), id)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"services": svcs, "count": len(svcs)})
+}
+
+// --- CONNECTION PROFILES HANDLERS ---
+
+func (r *Router) handleListConnections(w http.ResponseWriter, req *http.Request) {
+	profiles, err := r.workloadManager.ConnectionManager().ListConnectionProfiles(req.Context())
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"connections": profiles, "count": len(profiles)})
+}
+
+func (r *Router) handleCreateConnection(w http.ResponseWriter, req *http.Request) {
+	var profile connections.ConnectionProfile
+	if err := json.NewDecoder(req.Body).Decode(&profile); err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+	created, err := r.workloadManager.ConnectionManager().CreateConnectionProfile(req.Context(), &profile)
+	if err != nil {
+		if errors.Is(err, connections.ErrInvalidConnection) {
+			jsonError(w, http.StatusBadRequest, err.Error())
+		} else if errors.Is(err, connections.ErrConnectionConflict) {
+			jsonError(w, http.StatusConflict, err.Error())
+		} else {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	jsonResponse(w, http.StatusCreated, map[string]interface{}{"connection": created})
+}
+
+func (r *Router) handleGetConnection(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/connections/")
+	profile, err := r.workloadManager.ConnectionManager().GetConnectionProfile(req.Context(), id)
+	if err != nil {
+		if errors.Is(err, connections.ErrConnectionNotFound) {
+			jsonError(w, http.StatusNotFound, err.Error())
+		} else {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"connection": profile})
+}
+
+func (r *Router) handleUpdateConnection(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/connections/")
+	var updated connections.ConnectionProfile
+	if err := json.NewDecoder(req.Body).Decode(&updated); err != nil {
+		jsonError(w, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+	profile, err := r.workloadManager.ConnectionManager().UpdateConnectionProfile(req.Context(), id, &updated)
+	if err != nil {
+		if errors.Is(err, connections.ErrConnectionNotFound) {
+			jsonError(w, http.StatusNotFound, err.Error())
+		} else if errors.Is(err, connections.ErrInvalidConnection) {
+			jsonError(w, http.StatusBadRequest, err.Error())
+		} else {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"connection": profile})
+}
+
+func (r *Router) handleDeleteConnection(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/connections/")
+	if err := r.workloadManager.ConnectionManager().DeleteConnectionProfile(req.Context(), id); err != nil {
+		if errors.Is(err, connections.ErrConnectionNotFound) {
+			jsonError(w, http.StatusNotFound, err.Error())
+		} else {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]string{"message": "Connection profile deleted cleanly"})
+}
+
+func (r *Router) handleServiceConnections(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/services/")
+	id = strings.TrimSuffix(id, "/connections")
+
+	profiles, err := r.workloadManager.ConnectionManager().ListServiceConnections(req.Context(), id)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"connections": profiles, "count": len(profiles)})
+}
+
+func (r *Router) handleGenerateServiceConnectionProfile(w http.ResponseWriter, req *http.Request) {
+	id := extractPathID(req.URL.Path, "/api/v1/services/")
+	id = strings.TrimSuffix(id, "/connection-profile")
+
+	svc, err := r.workloadManager.ServiceManager().GetService(req.Context(), id)
+	if err != nil {
+		if errors.Is(err, services.ErrServiceNotFound) {
+			jsonError(w, http.StatusNotFound, err.Error())
+		} else {
+			jsonError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	var reqPayload struct {
+		TargetUser   string `json:"target_user"`
+		CredentialID string `json:"credential_id"`
+		SaveProfile  bool   `json:"save_profile"`
+	}
+	if req.Body != nil {
+		_ = json.NewDecoder(req.Body).Decode(&reqPayload)
+	}
+
+	var exp *networking.NetworkExposure
+	if svc.ExposureID != "" {
+		exp, _ = r.workloadManager.ExposureManager().GetNetworkExposure(req.Context(), svc.ExposureID)
+	}
+
+	profile, err := r.workloadManager.ConnectionManager().GenerateConnectionProfile(svc, exp, reqPayload.TargetUser, reqPayload.CredentialID)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if reqPayload.SaveProfile {
+		saved, err := r.workloadManager.ConnectionManager().CreateConnectionProfile(req.Context(), profile)
+		if err == nil {
+			profile = saved
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"connection": profile})
 }

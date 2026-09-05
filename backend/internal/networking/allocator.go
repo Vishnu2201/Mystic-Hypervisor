@@ -374,8 +374,8 @@ func (a *AllocatorEngine) isPortFree(port int, proto hosts.Protocol, existingRul
 }
 
 func isReservedManagementPort(extPort, intPort int, hostInfo *hosts.HostInfo) bool {
-	// Standard reserved SSH (22) and Mystic Control Plane (8443)
-	if extPort == 22 || intPort == 22 || extPort == 8443 || intPort == 8443 {
+	// Standard reserved SSH (22) and Mystic Control Plane (8443) on host external interface
+	if extPort == 22 || extPort == 8443 {
 		return true
 	}
 	return false

@@ -82,3 +82,59 @@ export interface AdoptionPreviewResult {
   blockers: string[]
   warnings: string[]
 }
+
+export interface NetworkExposure {
+  id: string
+  workload_id: string
+  workload_name?: string
+  gateway_id?: string
+  exposure_mode: string
+  public_ip?: string
+  public_port: number
+  internal_ip: string
+  internal_port: number
+  protocol: string
+  desired_state: string
+  actual_state: string
+  sync_status: string
+  description?: string
+  created_at: string
+  updated_at: string
+}
+
+export type ServiceType = 'SSH' | 'HTTP' | 'HTTPS' | 'TCP' | 'UDP' | 'CONSOLE'
+
+export interface Service {
+  id: string
+  workload_id: string
+  workload_name?: string
+  name: string
+  type: ServiceType
+  internal_ip: string
+  internal_port: number
+  protocol: string
+  exposure_id?: string
+  desired_state: string
+  actual_state: string
+  sync_status: string
+  is_public: boolean
+  description?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ConnectionProfile {
+  id: string
+  service_id: string
+  workload_id: string
+  label: string
+  protocol: string
+  endpoint_host: string
+  endpoint_port: number
+  target_user?: string
+  credential_id?: string
+  connection_url?: string
+  cli_command?: string
+  created_at: string
+  updated_at: string
+}

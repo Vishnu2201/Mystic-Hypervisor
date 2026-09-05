@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { ProviderPreflightResult } from '../types'
+import { ProviderPreflightResult, NetworkExposure, Service, ConnectionProfile } from '../types'
 import { AdoptionModal } from './AdoptionModal'
 
 export interface WorkloadItem {
@@ -53,11 +53,92 @@ export const WorkloadProvisioning: React.FC = () => {
   const [validationResult, setValidationResult] = useState<any | null>(null)
   const [opMessage, setOpMessage] = useState('')
   const [adoptTargetName, setAdoptTargetName] = useState<string | null>(null)
+  const [exposures, setExposures] = useState<NetworkExposure[]>([])
+  const [svcList, setSvcList] = useState<Service[]>([])
+  const [activeConnectProfile, setActiveConnectProfile] = useState<ConnectionProfile | null>(null)
+  const [copyFeedback, setCopyFeedback] = useState('')
 
   useEffect(() => {
     fetchWorkloads()
     fetchPreflight()
   }, [])
+
+  useEffect(() => {
+    if (selectedWorkload) {
+      fetchExposures(selectedWorkload.id)
+      fetchServices(selectedWorkload.id)
+    } else {
+      setExposures([])
+      setSvcList([])
+    }
+  }, [selectedWorkload])
+
+  const fetchExposures = async (workloadId: string) => {
+    try {
+      const res = await fetch(`/api/v1/workloads/${workloadId}/exposures`)
+      if (res.ok) {
+        const data = await res.json()
+        setExposures(data.exposures || [])
+      }
+    } catch (e) {
+      // API call failed or offline
+    }
+  }
+
+  const fetchServices = async (workloadId: string) => {
+    try {
+      const res = await fetch(`/api/v1/workloads/${workloadId}/services`)
+      if (res.ok) {
+        const data = await res.json()
+        setSvcList(data.services || [])
+      }
+    } catch (e) {
+      // API call failed or offline
+    }
+  }
+
+  const handleConnectClick = async (service: Service) => {
+    try {
+      const res = await fetch(`/api/v1/services/${service.id}/connection-profile`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_user: 'root', save_profile: true })
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setActiveConnectProfile(data.connection)
+        setCopyFeedback('')
+      }
+    } catch (e) {
+      // API error
+    }
+  }
+
+  const handleOpenService = async (service: Service) => {
+    try {
+      const res = await fetch(`/api/v1/services/${service.id}/connection-profile`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ save_profile: false })
+      })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.connection && data.connection.connection_url) {
+          window.open(data.connection.connection_url, '_blank')
+        }
+      }
+    } catch (e) {
+      //
+    }
+  }
+
+  const handleCopyCommand = (command: string) => {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(command)
+      setCopyFeedback('Copied to Clipboard!')
+      setTimeout(() => setCopyFeedback(''), 2000)
+    }
+  }
 
   const fetchWorkloads = async () => {
     setLoading(true)
@@ -426,6 +507,176 @@ export const WorkloadProvisioning: React.FC = () => {
             <button onClick={() => handleLifecycleOp('restart')} style={{ backgroundColor: '#0284c7', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}>Restart 🔄</button>
             <button onClick={() => handleLifecycleOp('reconcile')} style={{ backgroundColor: '#0d9488', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}>Reconcile State</button>
             <button onClick={() => handleLifecycleOp('delete')} style={{ backgroundColor: '#dc2626', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}>Delete 🗑</button>
+          </div>
+
+          {/* NETWORK EXPOSURES SECTION */}
+          <div style={{ marginTop: '8px', borderTop: '1px solid #334155', paddingTop: '12px' }}>
+            <div style={{ fontSize: '0.9rem', fontWeight: 600, color: '#e2e8f0', marginBottom: '8px' }}>
+              Network Exposure Rules ({exposures.length})
+            </div>
+            {exposures.length === 0 ? (
+              <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No explicit exposure rules configured for this workload.</div>
+            ) : (
+              <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.8rem' }}>
+                <thead>
+                  <tr style={{ backgroundColor: '#0f172a', color: '#94a3b8', borderBottom: '1px solid #334155' }}>
+                    <th style={{ padding: '6px 10px' }}>Mode</th>
+                    <th style={{ padding: '6px 10px' }}>Public Port</th>
+                    <th style={{ padding: '6px 10px' }}>Internal (IP:Port)</th>
+                    <th style={{ padding: '6px 10px' }}>Protocol</th>
+                    <th style={{ padding: '6px 10px' }}>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {exposures.map(exp => (
+                    <tr key={exp.id} style={{ borderBottom: '1px solid #334155' }}>
+                      <td style={{ padding: '6px 10px', color: '#38bdf8', fontWeight: 600 }}>{exp.exposure_mode}</td>
+                      <td style={{ padding: '6px 10px', color: '#f8fafc' }}>{exp.public_port > 0 ? exp.public_port : 'N/A'}</td>
+                      <td style={{ padding: '6px 10px', color: '#cbd5e1' }}>{exp.internal_ip}:{exp.internal_port}</td>
+                      <td style={{ padding: '6px 10px', color: '#94a3b8' }}>{exp.protocol}</td>
+                      <td style={{ padding: '6px 10px' }}>
+                        <span style={{ padding: '2px 6px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: 600, backgroundColor: exp.sync_status === 'in_sync' ? '#16a34a' : '#d97706', color: '#fff' }}>
+                          {exp.sync_status}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* SERVICES & CONNECTIONS SECTION */}
+          <div style={{ marginTop: '12px', borderTop: '1px solid #334155', paddingTop: '12px' }}>
+            <div style={{ fontSize: '0.9rem', fontWeight: 600, color: '#e2e8f0', marginBottom: '8px' }}>
+              Services & Connections ({svcList.length})
+            </div>
+            {svcList.length === 0 ? (
+              <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>No explicit services registered for this workload.</div>
+            ) : (
+              <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.8rem' }}>
+                <thead>
+                  <tr style={{ backgroundColor: '#0f172a', color: '#94a3b8', borderBottom: '1px solid #334155' }}>
+                    <th style={{ padding: '6px 10px' }}>Service Name</th>
+                    <th style={{ padding: '6px 10px' }}>Type</th>
+                    <th style={{ padding: '6px 10px' }}>Internal Endpoint</th>
+                    <th style={{ padding: '6px 10px' }}>Public Endpoint</th>
+                    <th style={{ padding: '6px 10px' }}>Status</th>
+                    <th style={{ padding: '6px 10px' }}>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {svcList.map(svc => {
+                    const linkedExp = exposures.find(e => e.id === svc.exposure_id)
+                    const publicEndpoint = linkedExp ? `${linkedExp.public_ip || 'Host'}:${linkedExp.public_port}` : 'Private / Internal'
+                    return (
+                      <tr key={svc.id} style={{ borderBottom: '1px solid #334155' }}>
+                        <td style={{ padding: '6px 10px', color: '#f8fafc', fontWeight: 600 }}>{svc.name}</td>
+                        <td style={{ padding: '6px 10px', color: '#38bdf8' }}>{svc.type}</td>
+                        <td style={{ padding: '6px 10px', color: '#cbd5e1' }}>{svc.internal_ip}:{svc.internal_port}</td>
+                        <td style={{ padding: '6px 10px', color: svc.is_public ? '#4ade80' : '#94a3b8' }}>{publicEndpoint}</td>
+                        <td style={{ padding: '6px 10px' }}>
+                          <span style={{ padding: '2px 6px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: 600, backgroundColor: svc.sync_status === 'in_sync' ? '#16a34a' : '#d97706', color: '#fff' }}>
+                            {svc.sync_status}
+                          </span>
+                        </td>
+                        <td style={{ padding: '6px 10px' }}>
+                          {svc.type === 'SSH' && (
+                            <button
+                              onClick={() => handleConnectClick(svc)}
+                              style={{ backgroundColor: '#0284c7', color: '#fff', border: 'none', padding: '3px 8px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '0.75rem' }}
+                            >
+                              Connect
+                            </button>
+                          )}
+                          {(svc.type === 'HTTP' || svc.type === 'HTTPS') && (
+                            <button
+                              onClick={() => handleOpenService(svc)}
+                              style={{ backgroundColor: '#16a34a', color: '#fff', border: 'none', padding: '3px 8px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '0.75rem' }}
+                            >
+                              Open Service ↗
+                            </button>
+                          )}
+                          {(svc.type === 'TCP' || svc.type === 'UDP' || svc.type === 'CONSOLE') && (
+                            <button
+                              onClick={() => handleConnectClick(svc)}
+                              style={{ backgroundColor: '#334155', color: '#f8fafc', border: '1px solid #475569', padding: '3px 8px', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '0.75rem' }}
+                            >
+                              Connection Details
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* CONNECTION PROFILE MODAL */}
+      {activeConnectProfile && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ backgroundColor: '#1e293b', width: '540px', borderRadius: '8px', border: '1px solid #475569', padding: '24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #334155', paddingBottom: '12px' }}>
+              <h3 style={{ margin: 0, color: '#38bdf8' }}>{activeConnectProfile.label} Profile</h3>
+              <button onClick={() => setActiveConnectProfile(null)} style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: '1.2rem', cursor: 'pointer' }}>✕</button>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', fontSize: '0.85rem' }}>
+              <div>
+                <span style={{ color: '#94a3b8', display: 'block' }}>Endpoint Host</span>
+                <strong style={{ color: '#f8fafc' }}>{activeConnectProfile.endpoint_host}</strong>
+              </div>
+              <div>
+                <span style={{ color: '#94a3b8', display: 'block' }}>Endpoint Port</span>
+                <strong style={{ color: '#f8fafc' }}>{activeConnectProfile.endpoint_port}</strong>
+              </div>
+              <div>
+                <span style={{ color: '#94a3b8', display: 'block' }}>Target User</span>
+                <strong style={{ color: '#f8fafc' }}>{activeConnectProfile.target_user || 'N/A'}</strong>
+              </div>
+              <div>
+                <span style={{ color: '#94a3b8', display: 'block' }}>Protocol</span>
+                <strong style={{ color: '#38bdf8' }}>{activeConnectProfile.protocol}</strong>
+              </div>
+            </div>
+
+            {activeConnectProfile.connection_url && (
+              <div>
+                <span style={{ color: '#94a3b8', fontSize: '0.8rem', display: 'block', marginBottom: '4px' }}>Connection URL</span>
+                <div style={{ backgroundColor: '#0f172a', padding: '8px 12px', borderRadius: '4px', border: '1px solid #334155', color: '#38bdf8', fontFamily: 'monospace', fontSize: '0.85rem', wordBreak: 'break-all' }}>
+                  {activeConnectProfile.connection_url}
+                </div>
+              </div>
+            )}
+
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                <span style={{ color: '#94a3b8', fontSize: '0.8rem' }}>CLI Command</span>
+                {copyFeedback && <span style={{ color: '#4ade80', fontSize: '0.75rem', fontWeight: 600 }}>{copyFeedback}</span>}
+              </div>
+              <div style={{ backgroundColor: '#0f172a', padding: '10px 12px', borderRadius: '4px', border: '1px solid #334155', color: '#f8fafc', fontFamily: 'monospace', fontSize: '0.85rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span>{activeConnectProfile.cli_command}</span>
+                <button
+                  onClick={() => handleCopyCommand(activeConnectProfile.cli_command || '')}
+                  style={{ backgroundColor: '#0284c7', color: '#fff', border: 'none', padding: '4px 10px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 600, marginLeft: '8px' }}
+                >
+                  Copy Command
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '12px' }}>
+              <button
+                onClick={() => setActiveConnectProfile(null)}
+                style={{ padding: '8px 16px', borderRadius: '4px', border: '1px solid #475569', backgroundColor: 'transparent', color: '#cbd5e1', cursor: 'pointer' }}
+              >
+                Close
+              </button>
+            </div>
           </div>
         </div>
       )}
