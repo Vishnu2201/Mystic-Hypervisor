@@ -1043,3 +1043,68 @@ func TestAdoptionRegressionNoFallbackWhenValidMemoryPresent(t *testing.T) {
 		t.Errorf("Expected MemoryMB == 3072, got %d", w.MemoryMB)
 	}
 }
+
+func TestReconcileAllUpdatesStaleWorkloadResourceLimits(t *testing.T) {
+	ctx := context.Background()
+	tp := NewTestProvider()
+	tp.instances["test-nano"] = &interfaces.Instance{
+		ID:       "test-nano",
+		Name:     "test-nano",
+		Type:     interfaces.InstanceTypeContainer,
+		State:    interfaces.StateRunning,
+		Provider: "incus",
+		Limits: interfaces.ResourceLimits{
+			CPUCores:    1,
+			MemoryBytes: 3 * 1024 * 1024 * 1024,  // 3GiB = 3072MB
+			DiskBytes:   10 * 1024 * 1024 * 1024, // 10GB
+		},
+		IPAddress: "10.170.92.70",
+	}
+
+	mgr := NewManagerWithProvider(tp)
+
+	// Simulate pre-existing workload with stale 512MB memory value from old store
+	staleWorkload := &Workload{
+		ID:                 "wl-stale-01",
+		Name:               "test-nano",
+		ProviderInstanceID: "test-nano",
+		Provider:           "incus",
+		Type:               TypeIncusContainer,
+		Status:             StatusRunning,
+		ActualState:        interfaces.StateRunning,
+		CPU:                1,
+		MemoryMB:           512, // Stale limit
+		StorageGB:          10,
+	}
+	mgr.workloads[staleWorkload.ID] = staleWorkload
+
+	// Run ReconcileAll
+	if err := mgr.ReconcileAll(ctx); err != nil {
+		t.Fatalf("ReconcileAll failed: %v", err)
+	}
+
+	// Verify MemoryMB was updated to 3072 from provider limits
+	w := mgr.workloads["wl-stale-01"]
+	if w.MemoryMB != 3072 {
+		t.Errorf("Expected MemoryMB to be updated to 3072 during ReconcileAll, got %d", w.MemoryMB)
+	}
+	if w.CPU != 1 {
+		t.Errorf("Expected CPU to remain 1, got %d", w.CPU)
+	}
+	if w.StorageGB != 10 {
+		t.Errorf("Expected StorageGB to remain 10, got %d", w.StorageGB)
+	}
+	if w.NetworkConfig.PrivateIPv4 != "10.170.92.70" {
+		t.Errorf("Expected PrivateIPv4 to be 10.170.92.70, got %s", w.NetworkConfig.PrivateIPv4)
+	}
+
+	// Now update provider limits and verify ReconcileWorkload updates single workload
+	tp.instances["test-nano"].Limits.MemoryBytes = 4 * 1024 * 1024 * 1024 // 4GiB = 4096MB
+	reconciledW, err := mgr.ReconcileWorkload(ctx, "wl-stale-01")
+	if err != nil {
+		t.Fatalf("ReconcileWorkload failed: %v", err)
+	}
+	if reconciledW.MemoryMB != 4096 {
+		t.Errorf("Expected MemoryMB to be updated to 4096 during ReconcileWorkload, got %d", reconciledW.MemoryMB)
+	}
+}

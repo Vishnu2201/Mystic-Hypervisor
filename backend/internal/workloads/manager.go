@@ -416,6 +416,15 @@ func (m *Manager) ReconcileAll(ctx context.Context) error {
 			if liveInst.IPAddress != "" {
 				w.NetworkConfig.PrivateIPv4 = liveInst.IPAddress
 			}
+			if liveInst.Limits.CPUCores > 0 {
+				w.CPU = liveInst.Limits.CPUCores
+			}
+			if liveInst.Limits.MemoryBytes > 0 {
+				w.MemoryMB = liveInst.Limits.MemoryBytes / (1024 * 1024)
+			}
+			if liveInst.Limits.DiskBytes > 0 {
+				w.StorageGB = liveInst.Limits.DiskBytes / (1024 * 1024 * 1024)
+			}
 			if liveInst.State == interfaces.StateRunning {
 				w.Status = StatusRunning
 			} else if liveInst.State == interfaces.StateStopped {
@@ -949,6 +958,21 @@ func (m *Manager) ReconcileWorkload(ctx context.Context, id string) (*Workload, 
 	w.ActualState = reconciled.AuthoritativeState
 	w.SyncStatus = reconciled.SyncStatus
 	w.LastProviderSync = time.Now().Format(time.RFC3339)
+
+	if liveInst != nil {
+		if liveInst.IPAddress != "" {
+			w.NetworkConfig.PrivateIPv4 = liveInst.IPAddress
+		}
+		if liveInst.Limits.CPUCores > 0 {
+			w.CPU = liveInst.Limits.CPUCores
+		}
+		if liveInst.Limits.MemoryBytes > 0 {
+			w.MemoryMB = liveInst.Limits.MemoryBytes / (1024 * 1024)
+		}
+		if liveInst.Limits.DiskBytes > 0 {
+			w.StorageGB = liveInst.Limits.DiskBytes / (1024 * 1024 * 1024)
+		}
+	}
 
 	if reconciled.SyncStatus == instances.SyncOutOfSync {
 		w.Status = StatusDrifted
