@@ -782,3 +782,161 @@ func TestManagerReconcileAllProviderErrorPreservesState(t *testing.T) {
 		t.Errorf("Provider error during reconciliation MUST NOT mark workload as ORPHANED or wiped; got status=%s sync=%s", w.Status, w.SyncStatus)
 	}
 }
+
+func TestCriticalAcceptanceAdoptionPersistenceRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	tempDir, err := os.MkdirTemp("", "mystic-critical-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	storeFile := filepath.Join(tempDir, "sub", "workloads.json")
+	store1 := NewFileStore(storeFile)
+
+	tp := NewTestProvider()
+	tp.instances["ext-critical-01"] = &interfaces.Instance{
+		ID:        "ext-critical-01",
+		Name:      "ext-critical-01",
+		Type:      interfaces.InstanceTypeContainer,
+		State:     interfaces.StateRunning,
+		Provider:  "incus",
+		IPAddress: "10.170.92.99",
+	}
+
+	mgr1 := NewManagerWithProviderAndStore(tp, store1)
+	adoptedW, err := mgr1.AdoptWorkload(ctx, "ext-critical-01")
+	if err != nil {
+		t.Fatalf("AdoptWorkload failed: %v", err)
+	}
+
+	// 1. Verify parent directory was created
+	if _, err := os.Stat(filepath.Dir(storeFile)); os.IsNotExist(err) {
+		t.Fatalf("FileStore Save failed to create parent directory!")
+	}
+
+	// 2. Verify workloads.json file exists
+	if _, err := os.Stat(storeFile); os.IsNotExist(err) {
+		t.Fatalf("FileStore Save failed to create workloads.json!")
+	}
+
+	// 3. Destroy mgr1 and create mgr2 with same store file path
+	store2 := NewFileStore(storeFile)
+	mgr2 := NewManagerWithProviderAndStore(tp, store2)
+
+	// 4. Verify workload restored with same ID, Name, and ProviderInstanceID
+	restoredW, err := mgr2.GetWorkload(ctx, adoptedW.ID)
+	if err != nil {
+		t.Fatalf("Failed to retrieve restored workload after manager recreation: %v", err)
+	}
+
+	if restoredW.ID != adoptedW.ID {
+		t.Errorf("Expected ID %s, got %s", adoptedW.ID, restoredW.ID)
+	}
+	if restoredW.Name != "ext-critical-01" {
+		t.Errorf("Expected Name ext-critical-01, got %s", restoredW.Name)
+	}
+	if restoredW.ProviderInstanceID != "ext-critical-01" {
+		t.Errorf("Expected ProviderInstanceID ext-critical-01, got %s", restoredW.ProviderInstanceID)
+	}
+}
+
+func TestAdoptWorkloadAbortsIfPersistenceFails(t *testing.T) {
+	ctx := context.Background()
+	tempDir, err := os.MkdirTemp("", "mystic-abort-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create a file blocking directory creation to simulate write failure
+	blocker := filepath.Join(tempDir, "blocker")
+	if err := os.WriteFile(blocker, []byte("file"), 0600); err != nil {
+		t.Fatalf("Failed to create blocker file: %v", err)
+	}
+	unwriteableStorePath := filepath.Join(blocker, "workloads.json")
+
+	store := NewFileStore(unwriteableStorePath)
+	tp := NewTestProvider()
+	tp.instances["ext-abort-01"] = &interfaces.Instance{
+		ID:       "ext-abort-01",
+		Name:     "ext-abort-01",
+		Type:     interfaces.InstanceTypeContainer,
+		State:    interfaces.StateRunning,
+		Provider: "incus",
+	}
+
+	mgr := NewManagerWithProviderAndStore(tp, store)
+	_, err = mgr.AdoptWorkload(ctx, "ext-abort-01")
+	if err == nil {
+		t.Fatalf("Expected AdoptWorkload to fail when persistence is unwriteable, got success!")
+	}
+
+	// Transactional Guarantee: Incus MUST NOT be mutated if disk write failed
+	inst := tp.instances["ext-abort-01"]
+	if inst.Labels != nil && (inst.Labels["user.mystic.owned"] == "true" || inst.Labels["mystic.owned"] == "true") {
+		t.Fatalf("Transactional failure: provider instance was tagged despite store write failure!")
+	}
+}
+
+func TestRecoveryOfUntrackedTaggedInstance(t *testing.T) {
+	ctx := context.Background()
+	tempDir, err := os.MkdirTemp("", "mystic-recovery-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	storeFile := filepath.Join(tempDir, "workloads.json")
+	store1 := NewFileStore(storeFile)
+	tp := NewTestProvider()
+
+	// Simulate VPS state: test-nano has tags on Incus (user.mystic.owned = true, user.mystic.workload_id = wl-12345), but DB record was lost
+	tp.instances["test-nano"] = &interfaces.Instance{
+		ID:        "test-nano",
+		Name:      "test-nano",
+		Type:      interfaces.InstanceTypeContainer,
+		State:     interfaces.StateRunning,
+		Provider:  "incus",
+		IPAddress: "10.170.92.70",
+		Labels: map[string]string{
+			"user.mystic.owned":       "true",
+			"user.mystic.workload_id": "wl-12345",
+		},
+	}
+
+	mgr1 := NewManagerWithProviderAndStore(tp, store1)
+
+	// 1. Verify Adoption Preview returns CanAdopt: true and warning for recovery
+	prev, err := mgr1.GetAdoptionPreview(ctx, "test-nano")
+	if err != nil {
+		t.Fatalf("GetAdoptionPreview failed: %v", err)
+	}
+	if !prev.CanAdopt || prev.AlreadyManaged {
+		t.Fatalf("Expected CanAdopt true and AlreadyManaged false for untracked tagged instance, got %+v", prev)
+	}
+	if len(prev.Warnings) == 0 {
+		t.Errorf("Expected recovery warning message in adoption preview")
+	}
+
+	// 2. Perform explicit adoption
+	recoveredW, err := mgr1.AdoptWorkload(ctx, "test-nano")
+	if err != nil {
+		t.Fatalf("AdoptWorkload failed to recover untracked tagged instance: %v", err)
+	}
+	if recoveredW.ID != "wl-12345" {
+		t.Errorf("Expected workload ID wl-12345 preserved from provider label, got %s", recoveredW.ID)
+	}
+
+	// 3. Restart manager and verify persistence restored
+	store2 := NewFileStore(storeFile)
+	mgr2 := NewManagerWithProviderAndStore(tp, store2)
+
+	restoredW, err := mgr2.GetWorkload(ctx, "wl-12345")
+	if err != nil {
+		t.Fatalf("Failed to retrieve recovered workload after manager restart: %v", err)
+	}
+	if restoredW.Name != "test-nano" || restoredW.Status != StatusRunning {
+		t.Errorf("Expected restored workload test-nano / RUNNING, got %+v", restoredW)
+	}
+}

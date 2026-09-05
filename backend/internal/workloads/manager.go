@@ -174,7 +174,7 @@ func (m *Manager) AdoptWorkload(ctx context.Context, name string) (*Workload, er
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check if already managed in m.workloads
+	// 1. Check if already managed in m.workloads database
 	for _, existing := range m.workloads {
 		if existing.Name == name || existing.ProviderInstanceID == name {
 			return nil, fmt.Errorf("instance '%s' is already managed: %w", name, ErrAlreadyManaged)
@@ -186,6 +186,7 @@ func (m *Manager) AdoptWorkload(ctx context.Context, name string) (*Workload, er
 		return nil, interfaces.ErrProviderUnavailable
 	}
 
+	// 2. Validate live provider resource
 	inst, err := instProvider.GetInstance(ctx, name)
 	if err != nil {
 		if errors.Is(err, interfaces.ErrInstanceNotFound) {
@@ -194,20 +195,16 @@ func (m *Manager) AdoptWorkload(ctx context.Context, name string) (*Workload, er
 		return nil, fmt.Errorf("failed to query provider for instance '%s': %w", name, err)
 	}
 
-	// Check if instance is already tagged as mystic-owned
-	if inst.Labels != nil && (inst.Labels["user.mystic.owned"] == "true" || inst.Labels["mystic.owned"] == "true") {
-		return nil, fmt.Errorf("instance '%s' is already tagged as managed: %w", name, ErrAlreadyManaged)
+	// 3. Generate workload identity (preserve existing workload ID if recovers missing record)
+	id := ""
+	if inst.Labels != nil && inst.Labels["user.mystic.workload_id"] != "" {
+		id = inst.Labels["user.mystic.workload_id"]
+	} else if inst.Labels != nil && inst.Labels["mystic.workload_id"] != "" {
+		id = inst.Labels["mystic.workload_id"]
+	} else {
+		id = fmt.Sprintf("wl-%d", time.Now().UnixNano())
 	}
-
-	id := fmt.Sprintf("wl-%d", time.Now().UnixNano())
 	now := time.Now().Format(time.RFC3339)
-
-	// Apply adoption metadata to real instance via provider (non-destructive)
-	if adopter, ok := m.incusDriver.(interfaces.InstanceAdopter); ok {
-		if _, err := adopter.AdoptInstance(ctx, name, id); err != nil {
-			return nil, fmt.Errorf("failed to apply adoption metadata to provider instance: %w", err)
-		}
-	}
 
 	wStatus := StatusStopped
 	if inst.State == interfaces.StateRunning {
@@ -268,11 +265,27 @@ func (m *Manager) AdoptWorkload(ctx context.Context, name string) (*Workload, er
 	}
 
 	w.PlanHash = ComputePlanHash(w)
-	m.workloads[id] = w
 
+	// 4. TRANSACTIONAL STEP 1: Persist enough durable state to disk store FIRST before provider tagging!
+	m.workloads[id] = w
 	if err := m.saveStoreUnlocked(); err != nil {
-		logging.GetLogger().Error("Workload adoption succeeded in Incus but persistence write failed", "id", id, "name", inst.Name, "error", err)
-		return w, fmt.Errorf("instance adopted in provider but failed to persist workload store: %w", err)
+		delete(m.workloads, id)
+		logging.GetLogger().Error("Workload adoption aborted: durable store write failed", "name", inst.Name, "error", err)
+		return nil, fmt.Errorf("failed to persist workload to disk store before provider tagging: %w", err)
+	}
+
+	// 5. TRANSACTIONAL STEP 2: Apply provider ownership metadata to real instance via provider (non-destructive)
+	if adopter, ok := m.incusDriver.(interfaces.InstanceAdopter); ok {
+		if _, err := adopter.AdoptInstance(ctx, name, id); err != nil {
+			delete(m.workloads, id)
+			_ = m.saveStoreUnlocked()
+			return nil, fmt.Errorf("failed to apply adoption metadata to provider instance: %w", err)
+		}
+	}
+
+	// 6. TRANSACTIONAL STEP 3: Persist final workload state and log audit event
+	if err := m.saveStoreUnlocked(); err != nil {
+		logging.GetLogger().Warn("Provider tagged successfully but final store refresh returned warning", "error", err)
 	}
 	m.guard.LogAudit(id, "ADOPT", m.incusDriver.Name(), inst.Name, w.PlanHash, string(w.Status), ResultSuccess, nil)
 
@@ -309,15 +322,13 @@ func (m *Manager) GetAdoptionPreview(ctx context.Context, name string) (*Adoptio
 		}
 	}
 
-	if inst.Labels != nil && (inst.Labels["user.mystic.owned"] == "true" || inst.Labels["mystic.owned"] == "true") {
-		alreadyManaged = true
-	}
-
 	blockers := make([]string, 0)
 	warnings := make([]string, 0)
 
 	if alreadyManaged {
 		blockers = append(blockers, fmt.Sprintf("Instance '%s' is already managed by Mystic Hypervisor.", name))
+	} else if inst.Labels != nil && (inst.Labels["user.mystic.owned"] == "true" || inst.Labels["mystic.owned"] == "true") {
+		warnings = append(warnings, fmt.Sprintf("Instance '%s' has existing Mystic ownership tags but is missing from database. Adoption will recover and re-establish persistent workload state.", name))
 	}
 
 	cpuCores := inst.Limits.CPUCores
