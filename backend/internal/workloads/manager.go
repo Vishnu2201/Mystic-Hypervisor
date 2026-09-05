@@ -10,6 +10,7 @@ import (
 
 	"github.com/mystic-hypervisor/mystic/backend/internal/hosts"
 	"github.com/mystic-hypervisor/mystic/backend/internal/instances"
+	"github.com/mystic-hypervisor/mystic/backend/internal/logging"
 	"github.com/mystic-hypervisor/mystic/backend/internal/networking"
 	"github.com/mystic-hypervisor/mystic/backend/internal/providers/incus"
 	"github.com/mystic-hypervisor/mystic/backend/internal/providers/interfaces"
@@ -25,6 +26,14 @@ type Manager struct {
 	reconciler  *instances.Reconciler
 	guard       *ExecutionGuard
 	store       Store
+}
+
+// StorePath returns the filesystem path of the workload store if using FileStore.
+func (m *Manager) StorePath() string {
+	if fs, ok := m.store.(*FileStore); ok && fs != nil {
+		return fs.FilePath()
+	}
+	return "in-memory"
 }
 
 // NewManager constructs a WorkloadManager with default Incus provider and default file store.
@@ -50,19 +59,41 @@ func NewManagerWithProviderAndStore(provider interfaces.Provider, store Store) *
 	}
 
 	if m.store != nil {
-		if loaded, err := m.store.Load(); err == nil && loaded != nil {
+		loaded, err := m.store.Load()
+		if err != nil {
+			logging.GetLogger().Error("Failed to load workload store on manager startup",
+				"store_path", m.StorePath(),
+				"error", err,
+			)
+			// Crucial safety boundary: DO NOT run ReconcileAll or overwrite store if loading failed!
+			return m
+		}
+		if loaded != nil {
 			m.workloads = loaded
+			logging.GetLogger().Info("Loaded persisted workloads from store",
+				"store_path", m.StorePath(),
+				"count", len(m.workloads),
+			)
 		}
 	}
 
-	_ = m.ReconcileAll(context.Background())
+	if err := m.ReconcileAll(context.Background()); err != nil {
+		logging.GetLogger().Warn("Startup reconciliation encountered provider warning/error", "error", err)
+	}
 	return m
 }
 
-func (m *Manager) saveStoreUnlocked() {
+func (m *Manager) saveStoreUnlocked() error {
 	if m.store != nil {
-		_ = m.store.Save(m.workloads)
+		if err := m.store.Save(m.workloads); err != nil {
+			logging.GetLogger().Error("Failed to persist workload store",
+				"store_path", m.StorePath(),
+				"error", err,
+			)
+			return fmt.Errorf("failed to persist workload store: %w", err)
+		}
 	}
+	return nil
 }
 
 func (m *Manager) CreateWorkload(ctx context.Context, spec WorkloadSpec) (*Workload, error) {
@@ -127,7 +158,10 @@ func (m *Manager) CreateWorkload(ctx context.Context, spec WorkloadSpec) (*Workl
 
 	w.PlanHash = ComputePlanHash(w)
 	m.workloads[id] = w
-	m.saveStoreUnlocked()
+	if err := m.saveStoreUnlocked(); err != nil {
+		delete(m.workloads, id)
+		return nil, fmt.Errorf("failed to persist created workload: %w", err)
+	}
 	return w, nil
 }
 
@@ -236,7 +270,10 @@ func (m *Manager) AdoptWorkload(ctx context.Context, name string) (*Workload, er
 	w.PlanHash = ComputePlanHash(w)
 	m.workloads[id] = w
 
-	m.saveStoreUnlocked()
+	if err := m.saveStoreUnlocked(); err != nil {
+		logging.GetLogger().Error("Workload adoption succeeded in Incus but persistence write failed", "id", id, "name", inst.Name, "error", err)
+		return w, fmt.Errorf("instance adopted in provider but failed to persist workload store: %w", err)
+	}
 	m.guard.LogAudit(id, "ADOPT", m.incusDriver.Name(), inst.Name, w.PlanHash, string(w.Status), ResultSuccess, nil)
 
 	return w, nil
@@ -332,11 +369,14 @@ func (m *Manager) ReconcileAll(ctx context.Context) error {
 	}
 
 	liveInsts, err := instProvider.ListInstances(ctx)
+	if err != nil {
+		logging.GetLogger().Warn("ReconcileAll skipped provider state sync: ListInstances returned error", "error", err)
+		return fmt.Errorf("reconciliation failed to list provider instances: %w", err)
+	}
+
 	liveMap := make(map[string]*interfaces.Instance)
-	if err == nil {
-		for i := range liveInsts {
-			liveMap[liveInsts[i].Name] = &liveInsts[i]
-		}
+	for i := range liveInsts {
+		liveMap[liveInsts[i].Name] = &liveInsts[i]
 	}
 
 	for _, w := range m.workloads {
@@ -370,7 +410,9 @@ func (m *Manager) ReconcileAll(ctx context.Context) error {
 		}
 	}
 
-	m.saveStoreUnlocked()
+	if err := m.saveStoreUnlocked(); err != nil {
+		logging.GetLogger().Warn("ReconcileAll completed but store save returned error", "error", err)
+	}
 	return nil
 }
 

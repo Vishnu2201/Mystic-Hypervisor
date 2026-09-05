@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -23,9 +24,20 @@ type FileStore struct {
 // NewFileStore constructs a FileStore at the given file path.
 func NewFileStore(filePath string) *FileStore {
 	if filePath == "" {
-		filePath = "/var/lib/mystic/workloads.json"
+		if envPath := os.Getenv("MYSTIC_WORKLOAD_STORE_PATH"); envPath != "" {
+			filePath = envPath
+		} else {
+			filePath = "/var/lib/mystic/workloads.json"
+		}
 	}
 	return &FileStore{filePath: filePath}
+}
+
+// FilePath returns the configured store file path.
+func (fs *FileStore) FilePath() string {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.filePath
 }
 
 // Save atomically writes workloads to disk.
@@ -35,22 +47,40 @@ func (fs *FileStore) Save(workloads map[string]*Workload) error {
 
 	dir := filepath.Dir(fs.filePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create workload store directory: %w", err)
+		return fmt.Errorf("failed to create workload store directory '%s': %w", dir, err)
 	}
 
 	data, err := json.MarshalIndent(workloads, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal workloads: %w", err)
+		return fmt.Errorf("failed to marshal workloads to JSON: %w", err)
 	}
 
 	tmpFile := fs.filePath + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0600); err != nil {
-		return fmt.Errorf("failed to write temporary workload store file: %w", err)
+	f, err := os.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to create temporary workload store file '%s': %w", tmpFile, err)
+	}
+
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("failed to write data to temporary workload store file '%s': %w", tmpFile, err)
+	}
+
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("failed to sync temporary workload store file '%s': %w", tmpFile, err)
+	}
+
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("failed to close temporary workload store file '%s': %w", tmpFile, err)
 	}
 
 	if err := os.Rename(tmpFile, fs.filePath); err != nil {
 		_ = os.Remove(tmpFile)
-		return fmt.Errorf("failed to commit workload store file: %w", err)
+		return fmt.Errorf("failed to commit workload store file from '%s' to '%s': %w", tmpFile, fs.filePath, err)
 	}
 
 	return nil
@@ -63,21 +93,33 @@ func (fs *FileStore) Load() (map[string]*Workload, error) {
 
 	workloads := make(map[string]*Workload)
 
-	if _, err := os.Stat(fs.filePath); os.IsNotExist(err) {
-		return workloads, nil
+	stat, err := os.Stat(fs.filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return workloads, nil
+		}
+		return nil, fmt.Errorf("failed to stat workload store file '%s': %w", fs.filePath, err)
+	}
+
+	if stat.IsDir() {
+		return nil, fmt.Errorf("configured workload store path '%s' is a directory, expected a JSON file", fs.filePath)
 	}
 
 	data, err := os.ReadFile(fs.filePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read workload store file: %w", err)
+		return nil, fmt.Errorf("failed to read workload store file '%s': %w", fs.filePath, err)
 	}
 
-	if len(data) == 0 {
+	if len(strings.TrimSpace(string(data))) == 0 {
 		return workloads, nil
 	}
 
 	if err := json.Unmarshal(data, &workloads); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal workload store JSON: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal workload store JSON from '%s': %w", fs.filePath, err)
+	}
+
+	if workloads == nil {
+		workloads = make(map[string]*Workload)
 	}
 
 	return workloads, nil

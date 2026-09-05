@@ -23,6 +23,7 @@ type TestProvider struct {
 	createErr error
 	startErr  error
 	getErr    error
+	listErr   error
 }
 
 func NewTestProvider() *TestProvider {
@@ -77,6 +78,9 @@ func (tp *TestProvider) ListInstances(ctx context.Context) ([]interfaces.Instanc
 	tp.mu.Lock()
 	defer tp.mu.Unlock()
 	tp.calls = append(tp.calls, "ListInstances")
+	if tp.listErr != nil {
+		return nil, tp.listErr
+	}
 	res := make([]interfaces.Instance, 0, len(tp.instances))
 	for _, inst := range tp.instances {
 		res = append(res, *inst)
@@ -670,5 +674,111 @@ func TestManagerGetAdoptionPreview(t *testing.T) {
 	}
 	if len(prevManaged.Blockers) == 0 {
 		t.Errorf("Expected blocker message for already managed instance")
+	}
+}
+
+func TestFileStoreMissingFileReturnsEmpty(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "mystic-store-missing-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	nonExistentFile := filepath.Join(tempDir, "sub", "nonexistent.json")
+	store := NewFileStore(nonExistentFile)
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Expected clean empty state for missing file, got error: %v", err)
+	}
+	if len(loaded) != 0 {
+		t.Fatalf("Expected empty map for missing file, got %d items", len(loaded))
+	}
+}
+
+func TestFileStoreMalformedFileReturnsError(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "mystic-store-malformed-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	malformedFile := filepath.Join(tempDir, "bad_workloads.json")
+	if err := os.WriteFile(malformedFile, []byte("{ invalid json content ..."), 0600); err != nil {
+		t.Fatalf("Failed to write malformed file: %v", err)
+	}
+
+	store := NewFileStore(malformedFile)
+	_, err = store.Load()
+	if err == nil {
+		t.Fatalf("Expected explicit error for malformed store file, got nil")
+	}
+
+	tp := NewTestProvider()
+	mgr := NewManagerWithProviderAndStore(tp, store)
+	// Must not wipe the malformed file on disk with empty state
+	data, _ := os.ReadFile(malformedFile)
+	if string(data) == "{}" {
+		t.Fatalf("Manager initialization wiped corrupted file on disk!")
+	}
+	_ = mgr
+}
+
+func TestFileStoreWriteFailureReturnsError(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "mystic-store-readonly-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Point store to a path inside a non-existent directory where creation will fail or directory is invalid
+	invalidPath := filepath.Join(tempDir, "read_only_file.txt", "workloads.json")
+	if err := os.WriteFile(filepath.Join(tempDir, "read_only_file.txt"), []byte("file-not-dir"), 0600); err != nil {
+		t.Fatalf("Failed to create blocker file: %v", err)
+	}
+
+	store := NewFileStore(invalidPath)
+	err = store.Save(map[string]*Workload{
+		"wl-test": {ID: "wl-test", Name: "test"},
+	})
+	if err == nil {
+		t.Fatalf("Expected explicit error when saving to unwriteable path, got nil")
+	}
+}
+
+func TestManagerReconcileAllProviderErrorPreservesState(t *testing.T) {
+	ctx := context.Background()
+	tempDir, err := os.MkdirTemp("", "mystic-provider-err-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	storeFile := filepath.Join(tempDir, "workloads.json")
+	store := NewFileStore(storeFile)
+
+	tp := NewTestProvider()
+	tp.listErr = errors.New("provider socket connection refused")
+
+	mgr := NewManagerWithProviderAndStore(tp, store)
+
+	mgr.workloads["wl-existing"] = &Workload{
+		ID:         "wl-existing",
+		Name:       "existing-inst",
+		Status:     StatusRunning,
+		SyncStatus: instances.SyncInSync,
+	}
+
+	err = mgr.ReconcileAll(ctx)
+	if err == nil {
+		t.Fatalf("Expected ReconcileAll to return provider error when ListInstances fails")
+	}
+
+	w, getErr := mgr.GetWorkload(ctx, "wl-existing")
+	if getErr != nil {
+		t.Fatalf("GetWorkload failed: %v", getErr)
+	}
+	if w.Status != StatusRunning || w.SyncStatus != instances.SyncInSync {
+		t.Errorf("Provider error during reconciliation MUST NOT mark workload as ORPHANED or wiped; got status=%s sync=%s", w.Status, w.SyncStatus)
 	}
 }

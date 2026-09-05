@@ -25,8 +25,9 @@ type ServerConfig struct {
 }
 
 type DatabaseConfig struct {
-	Driver string `json:"driver"`
-	Path   string `json:"path"`
+	Driver            string `json:"driver"`
+	Path              string `json:"path"`
+	WorkloadStorePath string `json:"workload_store_path"`
 }
 
 type AuthConfig struct {
@@ -72,8 +73,9 @@ func DefaultConfig() *Config {
 			Port: 8443,
 		},
 		Database: DatabaseConfig{
-			Driver: "sqlite",
-			Path:   "/var/lib/mystic/mystic.db",
+			Driver:            "sqlite",
+			Path:              "/var/lib/mystic/mystic.db",
+			WorkloadStorePath: "/var/lib/mystic/workloads.json",
 		},
 		Auth: AuthConfig{
 			JWTSecret:            "", // Must be provided via env or loaded securely
@@ -124,6 +126,9 @@ func LoadFromEnv() (*Config, error) {
 	}
 	if dbPath := os.Getenv("MYSTIC_DB_PATH"); dbPath != "" {
 		cfg.Database.Path = dbPath
+	}
+	if storePath := os.Getenv("MYSTIC_WORKLOAD_STORE_PATH"); storePath != "" {
+		cfg.Database.WorkloadStorePath = storePath
 	}
 	if secret := os.Getenv("MYSTIC_JWT_SECRET"); secret != "" {
 		cfg.Auth.JWTSecret = secret

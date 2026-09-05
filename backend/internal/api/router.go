@@ -24,11 +24,25 @@ type Router struct {
 
 // NewRouter creates a new API router using Go standard library net/http.
 func NewRouter(cfg *config.Config) *Router {
+	storePath := cfg.Database.WorkloadStorePath
+	if storePath == "" {
+		storePath = "/var/lib/mystic/workloads.json"
+	}
+
+	store := workloads.NewFileStore(storePath)
+	incusProv := incus.NewIncusProvider(cfg.Provider.IncusSocket)
+	wm := workloads.NewManagerWithProviderAndStore(incusProv, store)
+
+	logging.GetLogger().Info("Initialized Workload Manager with persistent store",
+		"workload_store_path", store.FilePath(),
+		"incus_socket", cfg.Provider.IncusSocket,
+	)
+
 	r := &Router{
 		cfg:             cfg,
 		mux:             http.NewServeMux(),
-		workloadManager: workloads.NewManager(),
-		incusDriver:     incus.NewIncusProvider("/var/lib/incus/unix.socket"),
+		workloadManager: wm,
+		incusDriver:     incusProv,
 	}
 	r.registerRoutes()
 	return r
