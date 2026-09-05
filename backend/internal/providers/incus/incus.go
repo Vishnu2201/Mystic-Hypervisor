@@ -129,11 +129,11 @@ type incusDevice struct {
 }
 
 type incusRawInstance struct {
-	Name            string                 `json:"name"`
-	Status          string                 `json:"status"`
-	Type            string                 `json:"type"`
-	Devices         map[string]incusDevice `json:"devices"`
-	ExpandedDevices map[string]incusDevice `json:"expanded_devices"`
+	Name            string                       `json:"name"`
+	Status          string                       `json:"status"`
+	Type            string                       `json:"type"`
+	Devices         map[string]map[string]string `json:"devices"`
+	ExpandedDevices map[string]map[string]string `json:"expanded_devices"`
 	State           struct {
 		Status     string `json:"status"`
 		StatusCode int    `json:"status_code"`
@@ -379,6 +379,18 @@ func (p *IncusProvider) ListInstances(ctx context.Context) ([]interfaces.Instanc
 			labels[k] = v
 		}
 
+		devs := make(map[string]map[string]string)
+		if item.ExpandedDevices != nil {
+			for k, v := range item.ExpandedDevices {
+				devs[k] = v
+			}
+		}
+		if item.Devices != nil {
+			for k, v := range item.Devices {
+				devs[k] = v
+			}
+		}
+
 		instancesList = append(instancesList, interfaces.Instance{
 			ID:        item.Name,
 			Name:      item.Name,
@@ -393,6 +405,7 @@ func (p *IncusProvider) ListInstances(ctx context.Context) ([]interfaces.Instanc
 				DiskBytes:   diskBytes,
 			},
 			Labels:    labels,
+			Devices:   devs,
 			CreatedAt: createdTime,
 			UpdatedAt: time.Now(),
 		})
@@ -908,14 +921,15 @@ func extractPrimaryIP(item incusRawInstance) string {
 	// Build map of configured Incus NIC devices
 	incusNics := make(map[string]bool) // ifaceName -> hasIncusNetwork
 
-	checkDeviceMap := func(devMap map[string]incusDevice) {
+	checkDeviceMap := func(devMap map[string]map[string]string) {
 		for key, dev := range devMap {
-			if dev.Type == "nic" || dev.Type == "" {
-				iface := dev.Name
+			devType := dev["type"]
+			if devType == "nic" || devType == "" {
+				iface := dev["name"]
 				if iface == "" {
 					iface = key
 				}
-				hasNet := dev.Network != "" || dev.Parent != ""
+				hasNet := dev["network"] != "" || dev["parent"] != ""
 				if currentHasNet, exists := incusNics[iface]; exists {
 					incusNics[iface] = currentHasNet || hasNet
 				} else {
@@ -1102,11 +1116,11 @@ func parseIncusCPULimit(val string) (int, error) {
 }
 
 func extractStorageBytes(item incusRawInstance) int64 {
-	checkDevices := func(devMap map[string]incusDevice) int64 {
+	checkDevices := func(devMap map[string]map[string]string) int64 {
 		for key, dev := range devMap {
-			if dev.Type == "disk" || key == "root" {
-				if dev.Size != "" {
-					if bytes, err := parseIncusByteSize(dev.Size); err == nil && bytes > 0 {
+			if dev["type"] == "disk" || key == "root" {
+				if sz := dev["size"]; sz != "" {
+					if bytes, err := parseIncusByteSize(sz); err == nil && bytes > 0 {
 						return bytes
 					}
 				}

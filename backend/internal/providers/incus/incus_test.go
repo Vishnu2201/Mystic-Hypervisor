@@ -209,8 +209,8 @@ func TestExtractPrimaryIP(t *testing.T) {
 	t.Run("IncusNicVsDocker0", func(t *testing.T) {
 		inst := incusRawInstance{
 			Name: "test-nano",
-			ExpandedDevices: map[string]incusDevice{
-				"eth0": {Type: "nic", Name: "eth0", Network: "incusbr0"},
+			ExpandedDevices: map[string]map[string]string{
+				"eth0": {"type": "nic", "name": "eth0", "network": "incusbr0"},
 			},
 		}
 		inst.State.Network = map[string]struct {
@@ -259,8 +259,8 @@ func TestExtractPrimaryIP(t *testing.T) {
 	t.Run("CustomNicNameIncusConnected", func(t *testing.T) {
 		inst := incusRawInstance{
 			Name: "custom-net-inst",
-			ExpandedDevices: map[string]incusDevice{
-				"net0": {Type: "nic", Name: "net0", Network: "custombr0"},
+			ExpandedDevices: map[string]map[string]string{
+				"net0": {"type": "nic", "name": "net0", "network": "custombr0"},
 			},
 		}
 		inst.State.Network = map[string]struct {

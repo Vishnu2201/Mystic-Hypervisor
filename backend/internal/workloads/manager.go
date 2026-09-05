@@ -497,6 +497,10 @@ func (m *Manager) ReconcileAll(ctx context.Context) error {
 		return fmt.Errorf("reconciliation failed to list provider instances: %w", err)
 	}
 
+	if m.exposureMgr != nil && m.exposureMgr.SSHPortAllocator() != nil {
+		m.exposureMgr.SSHPortAllocator().ReconcileFromProviderInstances(ctx, liveInsts)
+	}
+
 	liveMap := make(map[string]*interfaces.Instance)
 	for i := range liveInsts {
 		liveMap[liveInsts[i].Name] = &liveInsts[i]

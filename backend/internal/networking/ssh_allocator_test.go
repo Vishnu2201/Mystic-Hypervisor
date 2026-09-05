@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/mystic-hypervisor/mystic/backend/internal/providers/interfaces"
 )
 
 func TestSSHPortAllocator_JeskoAndSequentialAllocation(t *testing.T) {
@@ -164,4 +166,150 @@ func TestSSHPortAllocator_ReleaseAndReuse(t *testing.T) {
 	if alloc3.PublicPort != 22101 {
 		t.Errorf("Expected re-used port 22101, got %d", alloc3.PublicPort)
 	}
+}
+
+func TestSSHPortAllocator_ProviderReconciliationAndDeviceParsing(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Test ParseSSHProxyDevice unit cases
+	t.Run("ParseSSHProxyDevice_Validation", func(t *testing.T) {
+		// Valid Jesko SSH proxy device
+		jeskoDev := map[string]string{
+			"type":    "proxy",
+			"listen":  "tcp:0.0.0.0:22100",
+			"connect": "tcp:10.170.92.243:22",
+		}
+		info, ok := ParseSSHProxyDevice("ssh", jeskoDev)
+		if !ok || info.PublicPort != 22100 || info.PrivateIP != "10.170.92.243" {
+			t.Errorf("Failed to parse Jesko SSH proxy device: got %+v, ok=%v", info, ok)
+		}
+
+		// Non-SSH proxy device (port 80)
+		httpDev := map[string]string{
+			"type":    "proxy",
+			"listen":  "tcp:0.0.0.0:80",
+			"connect": "tcp:10.170.92.243:80",
+		}
+		if _, ok := ParseSSHProxyDevice("http", httpDev); ok {
+			t.Errorf("Expected non-SSH port 80 to be ignored")
+		}
+
+		// Out of range SSH proxy (port 22099)
+		lowPortDev := map[string]string{
+			"type":    "proxy",
+			"listen":  "tcp:0.0.0.0:22099",
+			"connect": "tcp:10.170.92.243:22",
+		}
+		if _, ok := ParseSSHProxyDevice("ssh-low", lowPortDev); ok {
+			t.Errorf("Expected port 22099 outside range 22100-22200 to be ignored")
+		}
+
+		// Out of range SSH proxy (port 22201)
+		highPortDev := map[string]string{
+			"type":    "proxy",
+			"listen":  "tcp:0.0.0.0:22201",
+			"connect": "tcp:10.170.92.243:22",
+		}
+		if _, ok := ParseSSHProxyDevice("ssh-high", highPortDev); ok {
+			t.Errorf("Expected port 22201 outside range 22100-22200 to be ignored")
+		}
+
+		// Non-SSH destination port inside range (port 8080)
+		nonSSHPortDev := map[string]string{
+			"type":    "proxy",
+			"listen":  "tcp:0.0.0.0:22105",
+			"connect": "tcp:10.170.92.243:8080",
+		}
+		if _, ok := ParseSSHProxyDevice("web-alt", nonSSHPortDev); ok {
+			t.Errorf("Expected non-22 destination port to be ignored")
+		}
+
+		// Disk device
+		diskDev := map[string]string{
+			"type": "disk",
+			"path": "/",
+		}
+		if _, ok := ParseSSHProxyDevice("root", diskDev); ok {
+			t.Errorf("Expected disk device to be ignored")
+		}
+
+		// NIC device
+		nicDev := map[string]string{
+			"type":    "nic",
+			"network": "incusbr0",
+		}
+		if _, ok := ParseSSHProxyDevice("eth0", nicDev); ok {
+			t.Errorf("Expected nic device to be ignored")
+		}
+	})
+
+	// 2. Test Provider Instances Reconciliation & Lowest Available Port Selection
+	t.Run("ReconcileProviderInstances_JeskoAndMultipleAllocations", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		storeFile := filepath.Join(tmpDir, "ssh_allocations.json")
+		store := NewFileSSHAllocationStore(storeFile)
+		allocator := NewSSHPortAllocator(store, nil)
+
+		// Mock live provider instances including Jesko (22100) and another instance (22102)
+		mockInstances := []interfaces.Instance{
+			{
+				ID:   "jesko",
+				Name: "jesko",
+				Devices: map[string]map[string]string{
+					"root": {"type": "disk", "path": "/"},
+					"eth0": {"type": "nic", "network": "incusbr0"},
+					"ssh":  {"type": "proxy", "listen": "tcp:0.0.0.0:22100", "connect": "tcp:10.170.92.243:22"},
+					"web":  {"type": "proxy", "listen": "tcp:0.0.0.0:80", "connect": "tcp:10.170.92.243:80"},
+				},
+			},
+			{
+				ID:   "vps-nano-02",
+				Name: "vps-nano-02",
+				Devices: map[string]map[string]string{
+					"eth0":      {"type": "nic", "network": "incusbr0"},
+					"ssh-proxy": {"type": "proxy", "listen": "tcp:0.0.0.0:22102", "connect": "tcp:10.170.92.244:22"},
+				},
+			},
+		}
+
+		// Reconcile from provider instances
+		allocator.ReconcileFromProviderInstances(ctx, mockInstances)
+
+		// Verify Jesko 22100 is marked occupied
+		jeskoAlloc, err := allocator.GetAllocation(ctx, "jesko")
+		if err != nil || jeskoAlloc.PublicPort != 22100 {
+			t.Fatalf("Expected Jesko port 22100 occupied, got alloc=%v, err=%v", jeskoAlloc, err)
+		}
+
+		// Verify vps-nano-02 22102 is marked occupied
+		nanoAlloc, err := allocator.GetAllocation(ctx, "vps-nano-02")
+		if err != nil || nanoAlloc.PublicPort != 22102 {
+			t.Fatalf("Expected vps-nano-02 port 22102 occupied, got alloc=%v, err=%v", nanoAlloc, err)
+		}
+
+		// Duplicate / repeated reconciliation call must NOT create duplicate records
+		allocator.ReconcileFromProviderInstances(ctx, mockInstances)
+		allocs, _ := allocator.ListAllocations(ctx)
+		if len(allocs) != 2 {
+			t.Errorf("Expected exactly 2 allocations after duplicate reconciliation, got %d", len(allocs))
+		}
+
+		// First new allocation MUST pick lowest available port (22101, since 22100 is Jesko & 22102 is nano)
+		newAlloc1, err := allocator.AllocatePort(ctx, "wl-new-01", "new-vps-01")
+		if err != nil {
+			t.Fatalf("AllocatePort failed: %v", err)
+		}
+		if newAlloc1.PublicPort != 22101 {
+			t.Errorf("Expected lowest available port 22101, got %d", newAlloc1.PublicPort)
+		}
+
+		// Second new allocation MUST pick 22103 (since 22100, 22101, 22102 are occupied)
+		newAlloc2, err := allocator.AllocatePort(ctx, "wl-new-02", "new-vps-02")
+		if err != nil {
+			t.Fatalf("AllocatePort failed: %v", err)
+		}
+		if newAlloc2.PublicPort != 22103 {
+			t.Errorf("Expected next port 22103, got %d", newAlloc2.PublicPort)
+		}
+	})
 }

@@ -44,17 +44,18 @@ type ResourceLimits struct {
 
 // Instance represents provider-level instance details.
 type Instance struct {
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	Type      InstanceType      `json:"type"`
-	State     InstanceState     `json:"state"`
-	Provider  string            `json:"provider"`
-	Node      string            `json:"node"`
-	IPAddress string            `json:"ip_address,omitempty"`
-	Limits    ResourceLimits    `json:"limits"`
-	Labels    map[string]string `json:"labels,omitempty"`
-	CreatedAt time.Time         `json:"created_at"`
-	UpdatedAt time.Time         `json:"updated_at"`
+	ID        string                       `json:"id"`
+	Name      string                       `json:"name"`
+	Type      InstanceType                 `json:"type"`
+	State     InstanceState                `json:"state"`
+	Provider  string                       `json:"provider"`
+	Node      string                       `json:"node"`
+	IPAddress string                       `json:"ip_address,omitempty"`
+	Limits    ResourceLimits               `json:"limits"`
+	Labels    map[string]string            `json:"labels,omitempty"`
+	Devices   map[string]map[string]string `json:"devices,omitempty"`
+	CreatedAt time.Time                    `json:"created_at"`
+	UpdatedAt time.Time                    `json:"updated_at"`
 }
 
 // InstanceMetrics represents live telemetry collected from the provider.

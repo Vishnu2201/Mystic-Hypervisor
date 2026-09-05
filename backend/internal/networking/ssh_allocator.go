@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/mystic-hypervisor/mystic/backend/internal/logging"
+	"github.com/mystic-hypervisor/mystic/backend/internal/providers/interfaces"
 )
 
 var (
@@ -335,6 +337,140 @@ func (a *SSHPortAllocator) ReconcileJeskoAndExistingInfrastructure(ctx context.C
 					"public_port", exp.PublicPort,
 					"workload", workloadID,
 					"private_ip", exp.InternalIP,
+				)
+			}
+		}
+	}
+	_ = a.saveStoreUnlocked()
+}
+
+// DiscoveredSSHProxyInfo holds parsed details of an Incus SSH proxy device.
+type DiscoveredSSHProxyInfo struct {
+	DeviceName      string
+	PublicPort      int
+	PublicIP        string
+	PrivateIP       string
+	DestinationPort int
+	Protocol        string
+}
+
+// ParseSSHProxyDevice parses a raw Incus device property map to determine if it represents a public SSH proxy mapping.
+func ParseSSHProxyDevice(deviceName string, dev map[string]string) (*DiscoveredSSHProxyInfo, bool) {
+	if dev == nil {
+		return nil, false
+	}
+	devType := strings.ToLower(dev["type"])
+	if devType != "" && devType != "proxy" {
+		return nil, false
+	}
+
+	listenStr := strings.TrimSpace(dev["listen"])
+	connectStr := strings.TrimSpace(dev["connect"])
+
+	if listenStr == "" || connectStr == "" {
+		return nil, false
+	}
+
+	// Parse listen string: e.g., "tcp:0.0.0.0:22100", "tcp:100.67.231.100:22100", "tcp::22100"
+	listenParts := strings.Split(listenStr, ":")
+	if len(listenParts) < 2 {
+		return nil, false
+	}
+
+	protocol := strings.ToUpper(listenParts[0])
+	if protocol != "TCP" {
+		return nil, false
+	}
+
+	portStr := listenParts[len(listenParts)-1]
+	publicPort, err := strconv.Atoi(portStr)
+	if err != nil || publicPort < SSHPortMin || publicPort > SSHPortMax {
+		return nil, false
+	}
+
+	publicIP := "0.0.0.0"
+	if len(listenParts) == 3 && listenParts[1] != "" {
+		publicIP = listenParts[1]
+	}
+
+	// Parse connect string: e.g., "tcp:10.170.92.243:22"
+	connectParts := strings.Split(connectStr, ":")
+	if len(connectParts) < 2 {
+		return nil, false
+	}
+
+	destPortStr := connectParts[len(connectParts)-1]
+	destPort, err := strconv.Atoi(destPortStr)
+	if err != nil || destPort != 22 {
+		return nil, false
+	}
+
+	privateIP := ""
+	if len(connectParts) == 3 {
+		privateIP = connectParts[1]
+	} else if len(connectParts) == 2 {
+		privateIP = connectParts[0]
+	}
+
+	return &DiscoveredSSHProxyInfo{
+		DeviceName:      deviceName,
+		PublicPort:      publicPort,
+		PublicIP:        publicIP,
+		PrivateIP:       privateIP,
+		DestinationPort: destPort,
+		Protocol:        protocol,
+	}, true
+}
+
+// ReconcileFromProviderInstances inspects real provider instances and their devices (including Jesko on 22100),
+// automatically reserving matching SSH proxy ports so they are never reallocated.
+func (a *SSHPortAllocator) ReconcileFromProviderInstances(ctx context.Context, instances []interfaces.Instance) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	for _, inst := range instances {
+		if inst.Devices == nil {
+			continue
+		}
+
+		workloadID := inst.ID
+		if workloadID == "" {
+			workloadID = inst.Name
+		}
+
+		for devName, devProps := range inst.Devices {
+			info, ok := ParseSSHProxyDevice(devName, devProps)
+			if !ok {
+				continue
+			}
+
+			// Register allocation if not already in portMap
+			if _, exists := a.portMap[info.PublicPort]; !exists {
+				now := time.Now()
+				alloc := &SSHAllocation{
+					ID:               fmt.Sprintf("ssh-alloc-%d", info.PublicPort),
+					PublicPort:       info.PublicPort,
+					Protocol:         info.Protocol,
+					Purpose:          "SSH",
+					WorkloadID:       workloadID,
+					InstanceID:       inst.Name,
+					InstanceName:     inst.Name,
+					IncusHostID:      "host-local",
+					IncusHostAddress: GetIncusHostAddress(),
+					PublicSSHHost:    GetPublicSSHHost(),
+					PrivateIP:        info.PrivateIP,
+					DestinationPort:  info.DestinationPort,
+					Status:           SSHStatusActive,
+					CreatedAt:        now,
+					UpdatedAt:        now,
+				}
+				a.allocations[workloadID] = alloc
+				a.portMap[info.PublicPort] = alloc
+				logging.GetLogger().Info("Discovered & reconciled existing provider SSH proxy device",
+					"instance", inst.Name,
+					"device", devName,
+					"public_port", info.PublicPort,
+					"private_ip", info.PrivateIP,
 				)
 			}
 		}
