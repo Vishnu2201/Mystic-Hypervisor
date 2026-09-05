@@ -19,8 +19,8 @@ func TestIncusProxyDriverCreateMissingDevice(t *testing.T) {
 		full := append([]string{name}, args...)
 		executedCmds = append(executedCmds, full)
 
-		// Mock incus config show test-nano --expanded --format json
-		if name == "incus" && len(args) >= 3 && args[0] == "config" && args[1] == "show" {
+		// Mock incus query /1.0/instances/test-nano
+		if name == "incus" && len(args) >= 2 && args[0] == "query" {
 			return []byte(`{"name":"test-nano","type":"container","devices":{}}`), nil
 		}
 
@@ -70,7 +70,7 @@ func TestIncusProxyDriverCreateIdenticalDeviceNoOp(t *testing.T) {
 		full := append([]string{name}, args...)
 		executedCmds = append(executedCmds, full)
 
-		if name == "incus" && len(args) >= 3 && args[0] == "config" && args[1] == "show" {
+		if name == "incus" && len(args) >= 2 && args[0] == "query" {
 			return []byte(`{
 				"name":"test-nano",
 				"devices":{
@@ -116,7 +116,7 @@ func TestIncusProxyDriverUpdateDifferingDevice(t *testing.T) {
 		full := append([]string{name}, args...)
 		executedCmds = append(executedCmds, full)
 
-		if name == "incus" && len(args) >= 3 && args[0] == "config" && args[1] == "show" {
+		if name == "incus" && len(args) >= 2 && args[0] == "query" {
 			return []byte(`{
 				"name":"test-nano",
 				"devices":{

@@ -20,7 +20,7 @@ var (
 	ErrInstanceNotFound    = errors.New("target Incus instance not found")
 )
 
-// IncusProxyDriver implements networking.ProviderExposureDriver using Incus native proxy devices.
+// IncusProxyDriver implements networking.ProviderExposureDriver using native Incus proxy devices via incus query API.
 type IncusProxyDriver struct {
 	mu         sync.RWMutex
 	socketPath string
@@ -85,25 +85,42 @@ func resolveInstanceName(exp *networking.NetworkExposure) (string, error) {
 	return instName, nil
 }
 
-type incusRawInstanceConfig struct {
-	Name    string                       `json:"name"`
-	Type    string                       `json:"type"`
-	Devices map[string]map[string]string `json:"devices"`
+type incusRawInstanceQuery struct {
+	Name            string                       `json:"name"`
+	Type            string                       `json:"type"`
+	Devices         map[string]map[string]string `json:"devices"`
+	ExpandedDevices map[string]map[string]string `json:"expanded_devices"`
+	Metadata        struct {
+		Name            string                       `json:"name"`
+		Type            string                       `json:"type"`
+		Devices         map[string]map[string]string `json:"devices"`
+		ExpandedDevices map[string]map[string]string `json:"expanded_devices"`
+	} `json:"metadata"`
 }
 
-func (d *IncusProxyDriver) getInstanceConfig(ctx context.Context, instName string) (*incusRawInstanceConfig, error) {
-	output, err := d.runCmd(ctx, "incus", "config", "show", instName, "--expanded", "--format", "json")
+func (d *IncusProxyDriver) getInstanceConfig(ctx context.Context, instName string) (*incusRawInstanceQuery, error) {
+	apiPath := fmt.Sprintf("/1.0/instances/%s", instName)
+	output, err := d.runCmd(ctx, "incus", "query", apiPath)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "Not Found") {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "404") || strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "Not Found") {
 			return nil, ErrInstanceNotFound
 		}
-		return nil, fmt.Errorf("failed to query Incus instance config for '%s': %w", instName, err)
+		return nil, fmt.Errorf("failed to query Incus instance API endpoint '%s' for '%s': %w", apiPath, instName, err)
 	}
 
-	var raw incusRawInstanceConfig
+	var raw incusRawInstanceQuery
 	if err := json.Unmarshal(output, &raw); err != nil {
-		return nil, fmt.Errorf("failed to parse Incus instance config JSON for '%s': %w", instName, err)
+		return nil, fmt.Errorf("failed to parse Incus instance API JSON for '%s': %w", instName, err)
 	}
+
+	if raw.ExpandedDevices == nil && raw.Metadata.ExpandedDevices != nil {
+		raw.ExpandedDevices = raw.Metadata.ExpandedDevices
+	}
+	if raw.Devices == nil && raw.Metadata.Devices != nil {
+		raw.Devices = raw.Metadata.Devices
+	}
+
 	return &raw, nil
 }
 
@@ -130,21 +147,26 @@ func (d *IncusProxyDriver) CreateExposure(ctx context.Context, exp *networking.N
 	}
 	expectedConnect := fmt.Sprintf("tcp:%s:%d", exp.InternalIP, exp.InternalPort)
 
-	// Idempotency check: Inspect existing instance configuration
+	// Idempotency check: Inspect existing instance configuration via REST API
 	rawConfig, err := d.getInstanceConfig(ctx, instName)
 	if err != nil {
 		return err
 	}
 
-	if rawConfig.Devices != nil {
-		if existingDev, exists := rawConfig.Devices[deviceName]; exists {
+	devicesMap := rawConfig.ExpandedDevices
+	if devicesMap == nil {
+		devicesMap = rawConfig.Devices
+	}
+
+	if devicesMap != nil {
+		if existingDev, exists := devicesMap[deviceName]; exists {
 			devType := existingDev["type"]
 			devListen := existingDev["listen"]
 			devConnect := existingDev["connect"]
 			devNat := existingDev["nat"]
 
 			// If identical, return success immediately (no-op)
-			if devType == "proxy" && (devListen == expectedListen || devListen == fmt.Sprintf("tcp::%d", exp.PublicPort)) && devConnect == expectedConnect && (devNat == "true" || devNat == "") {
+			if (devType == "" || devType == "proxy") && (devListen == expectedListen || devListen == fmt.Sprintf("tcp::%d", exp.PublicPort)) && devConnect == expectedConnect && (devNat == "true" || devNat == "") {
 				return nil
 			}
 
@@ -209,11 +231,16 @@ func (d *IncusProxyDriver) GetExposure(ctx context.Context, exp *networking.Netw
 		return &networking.NetworkExposureStatus{Active: false, State: hosts.ExposureStateUnconfigured}, nil
 	}
 
-	if rawConfig.Devices == nil {
+	devicesMap := rawConfig.ExpandedDevices
+	if devicesMap == nil {
+		devicesMap = rawConfig.Devices
+	}
+
+	if devicesMap == nil {
 		return &networking.NetworkExposureStatus{Active: false, State: hosts.ExposureStateUnconfigured}, nil
 	}
 
-	dev, exists := rawConfig.Devices[deviceName]
+	dev, exists := devicesMap[deviceName]
 	if !exists {
 		return &networking.NetworkExposureStatus{Active: false, State: hosts.ExposureStateUnconfigured}, nil
 	}
@@ -228,7 +255,7 @@ func (d *IncusProxyDriver) GetExposure(ctx context.Context, exp *networking.Netw
 	}
 	expectedConnect := fmt.Sprintf("tcp:%s:%d", exp.InternalIP, exp.InternalPort)
 
-	isActive := devType == "proxy" && (devListen == expectedListen || devListen == fmt.Sprintf("tcp::%d", exp.PublicPort)) && devConnect == expectedConnect
+	isActive := (devType == "" || devType == "proxy") && (devListen == expectedListen || devListen == fmt.Sprintf("tcp::%d", exp.PublicPort)) && devConnect == expectedConnect
 	if isActive {
 		return &networking.NetworkExposureStatus{
 			Active:    true,
