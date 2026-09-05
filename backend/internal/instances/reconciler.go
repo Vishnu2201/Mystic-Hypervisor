@@ -19,25 +19,28 @@ const (
 
 // InstanceMetadata stores user configurations and tags in Mystic DB.
 type InstanceMetadata struct {
-	ID           string                  `json:"id"`
-	Name         string                  `json:"name"`
-	Type         interfaces.InstanceType `json:"type"`
+	ID           string                   `json:"id"`
+	Name         string                   `json:"name"`
+	Type         interfaces.InstanceType  `json:"type"`
 	DesiredState interfaces.InstanceState `json:"desired_state"`
-	OwnerID      string                  `json:"owner_id"`
-	Node         string                  `json:"node"`
-	Tags         []string                `json:"tags,omitempty"`
-	CreatedAt    time.Time               `json:"created_at"`
-	UpdatedAt    time.Time               `json:"updated_at"`
+	CPUCores     int                      `json:"cpu_cores,omitempty"`
+	MemoryBytes  int64                    `json:"memory_bytes,omitempty"`
+	DiskBytes    int64                    `json:"disk_bytes,omitempty"`
+	OwnerID      string                   `json:"owner_id"`
+	Node         string                   `json:"node"`
+	Tags         []string                 `json:"tags,omitempty"`
+	CreatedAt    time.Time                `json:"created_at"`
+	UpdatedAt    time.Time                `json:"updated_at"`
 }
 
 // ReconciledInstance represents the unified view presented to API and UI.
 // The live state is strictly derived from the virtualization provider.
 type ReconciledInstance struct {
-	Metadata       InstanceMetadata        `json:"metadata"`
-	AuthoritativeState interfaces.InstanceState `json:"authoritative_state"`
-	SyncStatus     SyncStatus              `json:"sync_status"`
-	LiveIPAddress  string                  `json:"live_ip_address,omitempty"`
-	LiveMetrics    *interfaces.InstanceMetrics `json:"live_metrics,omitempty"`
+	Metadata           InstanceMetadata            `json:"metadata"`
+	AuthoritativeState interfaces.InstanceState    `json:"authoritative_state"`
+	SyncStatus         SyncStatus                  `json:"sync_status"`
+	LiveIPAddress      string                      `json:"live_ip_address,omitempty"`
+	LiveMetrics        *interfaces.InstanceMetrics `json:"live_metrics,omitempty"`
 }
 
 // Reconciler handles state resolution between database metadata and real hypervisors.
@@ -87,6 +90,22 @@ func (r *Reconciler) Reconcile(
 	// Case 3: Both exist — resolve sync status
 	status := SyncInSync
 	if meta.DesiredState != "" && meta.DesiredState != providerInst.State {
+		status = SyncOutOfSync
+	}
+
+	metaMemMB := meta.MemoryBytes / (1024 * 1024)
+	provMemMB := providerInst.Limits.MemoryBytes / (1024 * 1024)
+	if metaMemMB > 0 && provMemMB > 0 && metaMemMB != provMemMB {
+		status = SyncOutOfSync
+	}
+
+	metaDiskGB := meta.DiskBytes / (1024 * 1024 * 1024)
+	provDiskGB := providerInst.Limits.DiskBytes / (1024 * 1024 * 1024)
+	if metaDiskGB > 0 && provDiskGB > 0 && metaDiskGB != provDiskGB {
+		status = SyncOutOfSync
+	}
+
+	if meta.CPUCores > 0 && providerInst.Limits.CPUCores > 0 && meta.CPUCores != providerInst.Limits.CPUCores {
 		status = SyncOutOfSync
 	}
 

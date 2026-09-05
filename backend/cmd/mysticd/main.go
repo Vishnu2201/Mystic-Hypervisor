@@ -73,5 +73,6 @@ func main() {
 		logger.Error("Server forced to shutdown", "error", err)
 	}
 
+	_ = router.Close()
 	logger.Info("Mystic Hypervisor daemon stopped cleanly.")
 }

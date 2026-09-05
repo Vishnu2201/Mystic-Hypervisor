@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mystic-hypervisor/mystic/backend/internal/config"
 	"github.com/mystic-hypervisor/mystic/backend/internal/logging"
@@ -33,9 +36,20 @@ func NewRouter(cfg *config.Config) *Router {
 	incusProv := incus.NewIncusProvider(cfg.Provider.IncusSocket)
 	wm := workloads.NewManagerWithProviderAndStore(incusProv, store)
 
+	intervalSec := 15
+	if envSec := os.Getenv("MYSTIC_RECONCILE_INTERVAL_SECONDS"); envSec != "" {
+		if parsed, err := strconv.Atoi(envSec); err == nil && parsed > 0 {
+			intervalSec = parsed
+		}
+	} else if cfg.Monitoring.IntervalSeconds > 0 {
+		intervalSec = cfg.Monitoring.IntervalSeconds
+	}
+	wm.StartBackgroundReconciliation(time.Duration(intervalSec) * time.Second)
+
 	logging.GetLogger().Info("Initialized Workload Manager with persistent store",
 		"workload_store_path", store.FilePath(),
 		"incus_socket", cfg.Provider.IncusSocket,
+		"reconcile_interval_seconds", intervalSec,
 	)
 
 	r := &Router{
@@ -46,6 +60,14 @@ func NewRouter(cfg *config.Config) *Router {
 	}
 	r.registerRoutes()
 	return r
+}
+
+// Close gracefully stops router resources including background worker goroutines.
+func (r *Router) Close() error {
+	if r.workloadManager != nil {
+		r.workloadManager.StopBackgroundReconciliation()
+	}
+	return nil
 }
 
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -80,6 +102,7 @@ func (r *Router) registerRoutes() {
 	r.mux.HandleFunc("GET /api/v1/workloads", r.handleListWorkloads)
 	r.mux.HandleFunc("POST /api/v1/workloads", r.handleCreateWorkload)
 	r.mux.HandleFunc("POST /api/v1/workloads/adopt", r.handleAdoptWorkload)
+	r.mux.HandleFunc("POST /api/v1/workloads/reconcile", r.handleReconcileAllWorkloads)
 	r.mux.HandleFunc("GET /api/v1/workloads/{id}", r.handleGetWorkload)
 	r.mux.HandleFunc("POST /api/v1/workloads/{id}/validate", r.handleValidateWorkload)
 	r.mux.HandleFunc("POST /api/v1/workloads/{id}/plan", r.handlePlanWorkload)
@@ -371,6 +394,22 @@ func (r *Router) handleReconcileWorkload(w http.ResponseWriter, req *http.Reques
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"workload": wl,
+	})
+}
+
+func (r *Router) handleReconcileAllWorkloads(w http.ResponseWriter, req *http.Request) {
+	if err := r.workloadManager.ReconcileAll(req.Context()); err != nil {
+		writeWorkloadError(w, err)
+		return
+	}
+	workloadsList, err := r.workloadManager.ListWorkloads(req.Context())
+	if err != nil {
+		writeWorkloadError(w, err)
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"message":   "Bulk workload reconciliation completed.",
+		"workloads": workloadsList,
 	})
 }
 

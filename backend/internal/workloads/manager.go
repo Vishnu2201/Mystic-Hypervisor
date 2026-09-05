@@ -18,14 +18,18 @@ import (
 
 // Manager implements WorkloadService and manages real workload lifecycle.
 type Manager struct {
-	mu          sync.RWMutex
-	workloads   map[string]*Workload
-	plans       map[string]*ProvisioningPlan
-	allocator   *networking.AllocatorEngine
-	incusDriver interfaces.Provider
-	reconciler  *instances.Reconciler
-	guard       *ExecutionGuard
-	store       Store
+	mu               sync.RWMutex
+	workloads        map[string]*Workload
+	plans            map[string]*ProvisioningPlan
+	allocator        *networking.AllocatorEngine
+	incusDriver      interfaces.Provider
+	reconciler       *instances.Reconciler
+	guard            *ExecutionGuard
+	store            Store
+	reconcileStop    chan struct{}
+	reconcileDone    chan struct{}
+	reconcileRunning bool
+	reconcileMu      sync.Mutex
 }
 
 // StorePath returns the filesystem path of the workload store if using FileStore.
@@ -380,10 +384,72 @@ func (m *Manager) GetAdoptionPreview(ctx context.Context, name string) (*Adoptio
 	}, nil
 }
 
-func (m *Manager) ReconcileAll(ctx context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// StartBackgroundReconciliation launches a safe periodic background worker loop that reconciles provider state.
+func (m *Manager) StartBackgroundReconciliation(interval time.Duration) {
+	if interval <= 0 {
+		interval = 15 * time.Second
+	}
 
+	m.reconcileMu.Lock()
+	if m.reconcileRunning {
+		m.reconcileMu.Unlock()
+		return
+	}
+
+	m.reconcileRunning = true
+	m.reconcileStop = make(chan struct{})
+	m.reconcileDone = make(chan struct{})
+	stopCh := m.reconcileStop
+	doneCh := m.reconcileDone
+	m.reconcileMu.Unlock()
+
+	logging.GetLogger().Info("Starting background workload reconciliation worker", "interval_seconds", interval.Seconds())
+
+	go func() {
+		defer close(doneCh)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-stopCh:
+				logging.GetLogger().Info("Background workload reconciliation worker stopping")
+				return
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				if err := m.ReconcileAll(ctx); err != nil {
+					logging.GetLogger().Warn("Background reconciliation worker cycle encountered error", "error", err)
+				}
+				cancel()
+			}
+		}
+	}()
+}
+
+// StopBackgroundReconciliation cleanly terminates the background worker loop.
+func (m *Manager) StopBackgroundReconciliation() {
+	m.reconcileMu.Lock()
+	if !m.reconcileRunning || m.reconcileStop == nil {
+		m.reconcileMu.Unlock()
+		return
+	}
+
+	stopCh := m.reconcileStop
+	doneCh := m.reconcileDone
+	m.reconcileStop = nil
+	m.reconcileRunning = false
+	m.reconcileMu.Unlock()
+
+	close(stopCh)
+	select {
+	case <-doneCh:
+		logging.GetLogger().Info("Background workload reconciliation worker stopped cleanly")
+	case <-time.After(5 * time.Second):
+		logging.GetLogger().Warn("Background workload reconciliation worker stop timed out")
+	}
+}
+
+func (m *Manager) ReconcileAll(ctx context.Context) error {
 	instProvider, ok := m.incusDriver.InstanceProvider()
 	if !ok {
 		return nil
@@ -400,6 +466,9 @@ func (m *Manager) ReconcileAll(ctx context.Context) error {
 		liveMap[liveInsts[i].Name] = &liveInsts[i]
 	}
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	for _, w := range m.workloads {
 		if w.Status == StatusDraft {
 			continue
@@ -412,26 +481,32 @@ func (m *Manager) ReconcileAll(ctx context.Context) error {
 
 		liveInst, exists := liveMap[targetName]
 		if exists {
-			w.ActualState = liveInst.State
+			meta := &instances.InstanceMetadata{
+				ID:           w.ID,
+				Name:         w.Name,
+				Type:         interfaces.InstanceType(w.Type),
+				DesiredState: w.DesiredState,
+				CPUCores:     w.CPU,
+				MemoryBytes:  w.MemoryMB * 1024 * 1024,
+				DiskBytes:    w.StorageGB * 1024 * 1024 * 1024,
+			}
+			reconciled := m.reconciler.Reconcile(ctx, meta, liveInst)
+			w.ActualState = reconciled.AuthoritativeState
+			w.SyncStatus = reconciled.SyncStatus
+			w.LastProviderSync = time.Now().Format(time.RFC3339)
 			if liveInst.IPAddress != "" {
 				w.NetworkConfig.PrivateIPv4 = liveInst.IPAddress
 			}
-			if liveInst.Limits.CPUCores > 0 {
-				w.CPU = liveInst.Limits.CPUCores
-			}
-			if liveInst.Limits.MemoryBytes > 0 {
-				w.MemoryMB = liveInst.Limits.MemoryBytes / (1024 * 1024)
-			}
-			if liveInst.Limits.DiskBytes > 0 {
-				w.StorageGB = liveInst.Limits.DiskBytes / (1024 * 1024 * 1024)
-			}
-			if liveInst.State == interfaces.StateRunning {
+
+			if reconciled.SyncStatus == instances.SyncOutOfSync {
+				w.Status = StatusDrifted
+			} else if reconciled.SyncStatus == instances.SyncProviderMissing {
+				w.Status = StatusOrphaned
+			} else if reconciled.AuthoritativeState == interfaces.StateRunning {
 				w.Status = StatusRunning
-			} else if liveInst.State == interfaces.StateStopped {
+			} else if reconciled.AuthoritativeState == interfaces.StateStopped {
 				w.Status = StatusStopped
 			}
-			w.SyncStatus = instances.SyncInSync
-			w.LastProviderSync = time.Now().Format(time.RFC3339)
 		} else {
 			w.ActualState = interfaces.StateUnknown
 			w.Status = StatusOrphaned
@@ -950,8 +1025,11 @@ func (m *Manager) ReconcileWorkload(ctx context.Context, id string) (*Workload, 
 	meta := &instances.InstanceMetadata{
 		ID:           w.ID,
 		Name:         w.Name,
-		Type:         interfaces.InstanceTypeContainer,
+		Type:         interfaces.InstanceType(w.Type),
 		DesiredState: w.DesiredState,
+		CPUCores:     w.CPU,
+		MemoryBytes:  w.MemoryMB * 1024 * 1024,
+		DiskBytes:    w.StorageGB * 1024 * 1024 * 1024,
 	}
 
 	reconciled := m.reconciler.Reconcile(ctx, meta, liveInst)
@@ -959,19 +1037,8 @@ func (m *Manager) ReconcileWorkload(ctx context.Context, id string) (*Workload, 
 	w.SyncStatus = reconciled.SyncStatus
 	w.LastProviderSync = time.Now().Format(time.RFC3339)
 
-	if liveInst != nil {
-		if liveInst.IPAddress != "" {
-			w.NetworkConfig.PrivateIPv4 = liveInst.IPAddress
-		}
-		if liveInst.Limits.CPUCores > 0 {
-			w.CPU = liveInst.Limits.CPUCores
-		}
-		if liveInst.Limits.MemoryBytes > 0 {
-			w.MemoryMB = liveInst.Limits.MemoryBytes / (1024 * 1024)
-		}
-		if liveInst.Limits.DiskBytes > 0 {
-			w.StorageGB = liveInst.Limits.DiskBytes / (1024 * 1024 * 1024)
-		}
+	if liveInst != nil && liveInst.IPAddress != "" {
+		w.NetworkConfig.PrivateIPv4 = liveInst.IPAddress
 	}
 
 	if reconciled.SyncStatus == instances.SyncOutOfSync {

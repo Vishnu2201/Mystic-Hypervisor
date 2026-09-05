@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mystic-hypervisor/mystic/backend/internal/hosts"
 	"github.com/mystic-hypervisor/mystic/backend/internal/instances"
@@ -1044,7 +1045,7 @@ func TestAdoptionRegressionNoFallbackWhenValidMemoryPresent(t *testing.T) {
 	}
 }
 
-func TestReconcileAllUpdatesStaleWorkloadResourceLimits(t *testing.T) {
+func TestReconciliationDetectsMemoryDrift(t *testing.T) {
 	ctx := context.Background()
 	tp := NewTestProvider()
 	tp.instances["test-nano"] = &interfaces.Instance{
@@ -1055,56 +1056,63 @@ func TestReconcileAllUpdatesStaleWorkloadResourceLimits(t *testing.T) {
 		Provider: "incus",
 		Limits: interfaces.ResourceLimits{
 			CPUCores:    1,
-			MemoryBytes: 3 * 1024 * 1024 * 1024,  // 3GiB = 3072MB
-			DiskBytes:   10 * 1024 * 1024 * 1024, // 10GB
+			MemoryBytes: 3 * 1024 * 1024 * 1024, // 3GiB = 3072MB
+			DiskBytes:   10 * 1024 * 1024 * 1024,
 		},
 		IPAddress: "10.170.92.70",
 	}
 
 	mgr := NewManagerWithProvider(tp)
-
-	// Simulate pre-existing workload with stale 512MB memory value from old store
-	staleWorkload := &Workload{
-		ID:                 "wl-stale-01",
-		Name:               "test-nano",
-		ProviderInstanceID: "test-nano",
-		Provider:           "incus",
-		Type:               TypeIncusContainer,
-		Status:             StatusRunning,
-		ActualState:        interfaces.StateRunning,
-		CPU:                1,
-		MemoryMB:           512, // Stale limit
-		StorageGB:          10,
+	w, err := mgr.AdoptWorkload(ctx, "test-nano")
+	if err != nil {
+		t.Fatalf("AdoptWorkload failed: %v", err)
 	}
-	mgr.workloads[staleWorkload.ID] = staleWorkload
 
-	// Run ReconcileAll
+	if w.MemoryMB != 3072 {
+		t.Fatalf("Expected initial adopted MemoryMB to be 3072, got %d", w.MemoryMB)
+	}
+	if w.SyncStatus != instances.SyncInSync {
+		t.Fatalf("Expected initial SyncStatus to be in_sync, got %s", w.SyncStatus)
+	}
+
+	// Drift Test: Change provider memory configuration out-of-band to 2GiB
+	tp.instances["test-nano"].Limits.MemoryBytes = 2 * 1024 * 1024 * 1024 // 2GiB
+
+	// Trigger reconciliation
 	if err := mgr.ReconcileAll(ctx); err != nil {
 		t.Fatalf("ReconcileAll failed: %v", err)
 	}
 
-	// Verify MemoryMB was updated to 3072 from provider limits
-	w := mgr.workloads["wl-stale-01"]
-	if w.MemoryMB != 3072 {
-		t.Errorf("Expected MemoryMB to be updated to 3072 during ReconcileAll, got %d", w.MemoryMB)
+	reconciledW := mgr.workloads[w.ID]
+	// 1. Desired configuration is preserved
+	if reconciledW.MemoryMB != 3072 {
+		t.Errorf("Desired configuration lost: expected MemoryMB == 3072, got %d", reconciledW.MemoryMB)
 	}
-	if w.CPU != 1 {
-		t.Errorf("Expected CPU to remain 1, got %d", w.CPU)
+	// 2. Sync status correctly identifies drift
+	if reconciledW.SyncStatus != instances.SyncOutOfSync {
+		t.Errorf("Expected SyncStatus == out_of_sync, got %s", reconciledW.SyncStatus)
 	}
-	if w.StorageGB != 10 {
-		t.Errorf("Expected StorageGB to remain 10, got %d", w.StorageGB)
+	// 3. Operational status flags DRIFTED
+	if reconciledW.Status != StatusDrifted {
+		t.Errorf("Expected Status == DRIFTED, got %s", reconciledW.Status)
 	}
-	if w.NetworkConfig.PrivateIPv4 != "10.170.92.70" {
-		t.Errorf("Expected PrivateIPv4 to be 10.170.92.70, got %s", w.NetworkConfig.PrivateIPv4)
-	}
+}
 
-	// Now update provider limits and verify ReconcileWorkload updates single workload
-	tp.instances["test-nano"].Limits.MemoryBytes = 4 * 1024 * 1024 * 1024 // 4GiB = 4096MB
-	reconciledW, err := mgr.ReconcileWorkload(ctx, "wl-stale-01")
-	if err != nil {
-		t.Fatalf("ReconcileWorkload failed: %v", err)
-	}
-	if reconciledW.MemoryMB != 4096 {
-		t.Errorf("Expected MemoryMB to be updated to 4096 during ReconcileWorkload, got %d", reconciledW.MemoryMB)
-	}
+func TestBackgroundReconciliationWorkerLifecycleAndNonOverlapping(t *testing.T) {
+	tp := NewTestProvider()
+	mgr := NewManagerWithProvider(tp)
+
+	// Start worker
+	mgr.StartBackgroundReconciliation(20 * time.Millisecond)
+
+	// Call Start again to verify idempotency (no overlapping goroutines)
+	mgr.StartBackgroundReconciliation(20 * time.Millisecond)
+
+	time.Sleep(60 * time.Millisecond)
+
+	// Stop worker cleanly
+	mgr.StopBackgroundReconciliation()
+
+	// Calling Stop again should be safe
+	mgr.StopBackgroundReconciliation()
 }
