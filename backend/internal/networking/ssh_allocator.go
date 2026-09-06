@@ -30,10 +30,6 @@ type SSHPortAllocator struct {
 
 // NewSSHPortAllocator constructs an SSHPortAllocator.
 func NewSSHPortAllocator(store SSHAllocationStore, exposureMgr *ExposureManager) *SSHPortAllocator {
-	if store == nil {
-		store = NewFileSSHAllocationStore("")
-	}
-
 	alloc := &SSHPortAllocator{
 		store:       store,
 		allocations: make(map[string]*SSHAllocation),
@@ -41,17 +37,19 @@ func NewSSHPortAllocator(store SSHAllocationStore, exposureMgr *ExposureManager)
 		exposureMgr: exposureMgr,
 	}
 
-	if loaded, err := store.Load(); err == nil && loaded != nil {
-		for _, a := range loaded {
-			alloc.allocations[a.WorkloadID] = a
-			if a.Status != SSHStatusReleased && a.PublicPort >= SSHPortMin && a.PublicPort <= SSHPortMax {
-				alloc.portMap[a.PublicPort] = a
+	if store != nil {
+		if loaded, err := store.Load(); err == nil && loaded != nil {
+			for _, a := range loaded {
+				alloc.allocations[a.WorkloadID] = a
+				if a.Status != SSHStatusReleased && a.PublicPort >= SSHPortMin && a.PublicPort <= SSHPortMax {
+					alloc.portMap[a.PublicPort] = a
+				}
 			}
+			logging.GetLogger().Info("Loaded SSH port allocations from store",
+				"store_path", store.FilePath(),
+				"count", len(alloc.allocations),
+			)
 		}
-		logging.GetLogger().Info("Loaded SSH port allocations from store",
-			"store_path", store.FilePath(),
-			"count", len(alloc.allocations),
-		)
 	}
 
 	return alloc

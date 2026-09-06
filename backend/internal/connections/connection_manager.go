@@ -38,11 +38,8 @@ type ConnectionManager struct {
 	expResolver ExposureResolver
 }
 
-// NewConnectionManager constructs a ConnectionManager with default FileConnectionStore.
+// NewConnectionManager constructs a ConnectionManager.
 func NewConnectionManager(store ConnectionStore, svcResolver ServiceResolver, expResolver ExposureResolver) *ConnectionManager {
-	if store == nil {
-		store = NewFileConnectionStore("")
-	}
 	cm := &ConnectionManager{
 		profiles:    make(map[string]*ConnectionProfile),
 		store:       store,
@@ -50,11 +47,13 @@ func NewConnectionManager(store ConnectionStore, svcResolver ServiceResolver, ex
 		expResolver: expResolver,
 	}
 
-	if loaded, err := store.Load(); err == nil && loaded != nil {
-		cm.profiles = loaded
-		logging.GetLogger().Info("Loaded connection profiles from store", "store_path", store.FilePath(), "count", len(cm.profiles))
-	} else if err != nil {
-		logging.GetLogger().Error("Failed to load connection store", "store_path", store.FilePath(), "error", err)
+	if store != nil {
+		if loaded, err := store.Load(); err == nil && loaded != nil {
+			cm.profiles = loaded
+			logging.GetLogger().Info("Loaded connection profiles from store", "store_path", store.FilePath(), "count", len(cm.profiles))
+		} else if err != nil {
+			logging.GetLogger().Error("Failed to load connection store", "store_path", store.FilePath(), "error", err)
+		}
 	}
 
 	return cm

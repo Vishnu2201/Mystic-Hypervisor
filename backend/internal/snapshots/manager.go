@@ -38,9 +38,6 @@ type Manager struct {
 
 // NewManager creates a SnapshotManager instance.
 func NewManager(store SnapshotStore, provider interfaces.Provider, resolver SnapshotWorkloadResolver) *Manager {
-	if store == nil {
-		store = NewFileSnapshotStore("")
-	}
 	m := &Manager{
 		store:       store,
 		provider:    provider,
@@ -48,12 +45,14 @@ func NewManager(store SnapshotStore, provider interfaces.Provider, resolver Snap
 		snapshotMap: make(map[string]*Snapshot),
 	}
 
-	if loaded, err := m.store.Load(); err == nil && loaded != nil {
-		m.snapshotMap = loaded
-		logging.GetLogger().Info("Loaded persisted snapshots from store",
-			"store_path", m.store.FilePath(),
-			"count", len(loaded),
-		)
+	if store != nil {
+		if loaded, err := m.store.Load(); err == nil && loaded != nil {
+			m.snapshotMap = loaded
+			logging.GetLogger().Info("Loaded persisted snapshots from store",
+				"store_path", m.store.FilePath(),
+				"count", len(loaded),
+			)
+		}
 	}
 
 	return m
@@ -282,7 +281,10 @@ func (m *Manager) CreateSnapshot(ctx context.Context, workloadID, snapshotName s
 
 	m.mu.Lock()
 	m.snapshotMap[snapID] = snap
-	saveErr := m.store.Save(m.snapshotMap)
+	var saveErr error
+	if m.store != nil {
+		saveErr = m.store.Save(m.snapshotMap)
+	}
 	m.mu.Unlock()
 
 	if saveErr != nil {
@@ -331,7 +333,9 @@ func (m *Manager) RestoreSnapshot(ctx context.Context, workloadID, snapshotName 
 	m.mu.Lock()
 	if existing, ok := m.snapshotMap[snap.ID]; ok {
 		existing.Status = "ACTIVE"
-		_ = m.store.Save(m.snapshotMap)
+		if m.store != nil {
+			_ = m.store.Save(m.snapshotMap)
+		}
 	}
 	m.mu.Unlock()
 
@@ -370,7 +374,10 @@ func (m *Manager) DeleteSnapshot(ctx context.Context, workloadID, snapshotName s
 
 	m.mu.Lock()
 	delete(m.snapshotMap, snapID)
-	saveErr := m.store.Save(m.snapshotMap)
+	var saveErr error
+	if m.store != nil {
+		saveErr = m.store.Save(m.snapshotMap)
+	}
 	m.mu.Unlock()
 
 	if saveErr != nil {

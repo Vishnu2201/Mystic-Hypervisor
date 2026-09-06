@@ -34,22 +34,21 @@ type ServiceManager struct {
 	expResolver ExposureResolver
 }
 
-// NewServiceManager constructs a ServiceManager with default FileServiceStore.
+// NewServiceManager constructs a ServiceManager.
 func NewServiceManager(store ServiceStore, expResolver ExposureResolver) *ServiceManager {
-	if store == nil {
-		store = NewFileServiceStore("")
-	}
 	sm := &ServiceManager{
 		services:    make(map[string]*Service),
 		store:       store,
 		expResolver: expResolver,
 	}
 
-	if loaded, err := store.Load(); err == nil && loaded != nil {
-		sm.services = loaded
-		logging.GetLogger().Info("Loaded services from store", "store_path", store.FilePath(), "count", len(sm.services))
-	} else if err != nil {
-		logging.GetLogger().Error("Failed to load service store", "store_path", store.FilePath(), "error", err)
+	if store != nil {
+		if loaded, err := store.Load(); err == nil && loaded != nil {
+			sm.services = loaded
+			logging.GetLogger().Info("Loaded services from store", "store_path", store.FilePath(), "count", len(sm.services))
+		} else if err != nil {
+			logging.GetLogger().Error("Failed to load service store", "store_path", store.FilePath(), "error", err)
+		}
 	}
 
 	return sm

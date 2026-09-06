@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -29,11 +30,20 @@ type ExposureManager struct {
 	driver       ProviderExposureDriver
 }
 
-// NewExposureManager constructs an ExposureManager with default FileExposureStore.
+// NewExposureManager constructs an ExposureManager. If store is a FileExposureStore, sshStore defaults to ssh_allocations.json in the same directory.
 func NewExposureManager(store ExposureStore, driver ProviderExposureDriver) *ExposureManager {
-	if store == nil {
-		store = NewFileExposureStore("")
+	var sshStore SSHAllocationStore
+	if store != nil {
+		if fs, ok := store.(*FileExposureStore); ok && fs != nil && fs.FilePath() != "" && fs.FilePath() != "in-memory" {
+			dir := filepath.Dir(fs.FilePath())
+			sshStore = NewFileSSHAllocationStore(filepath.Join(dir, "ssh_allocations.json"))
+		}
 	}
+	return NewExposureManagerWithSSHStore(store, sshStore, driver)
+}
+
+// NewExposureManagerWithSSHStore constructs an ExposureManager with explicit exposure store and SSH allocation store.
+func NewExposureManagerWithSSHStore(store ExposureStore, sshStore SSHAllocationStore, driver ProviderExposureDriver) *ExposureManager {
 	em := &ExposureManager{
 		exposures: make(map[string]*NetworkExposure),
 		allocator: NewAllocatorEngine(),
@@ -41,14 +51,15 @@ func NewExposureManager(store ExposureStore, driver ProviderExposureDriver) *Exp
 		driver:    driver,
 	}
 
-	if loaded, err := store.Load(); err == nil && loaded != nil {
-		em.exposures = loaded
-		logging.GetLogger().Info("Loaded network exposures from store", "store_path", store.FilePath(), "count", len(em.exposures))
-	} else if err != nil {
-		logging.GetLogger().Error("Failed to load network exposure store", "store_path", store.FilePath(), "error", err)
+	if store != nil {
+		if loaded, err := store.Load(); err == nil && loaded != nil {
+			em.exposures = loaded
+			logging.GetLogger().Info("Loaded network exposures from store", "store_path", store.FilePath(), "count", len(em.exposures))
+		} else if err != nil {
+			logging.GetLogger().Error("Failed to load network exposure store", "store_path", store.FilePath(), "error", err)
+		}
 	}
 
-	sshStore := NewFileSSHAllocationStore("")
 	em.sshAllocator = NewSSHPortAllocator(sshStore, em)
 	em.sshAllocator.ReconcileJeskoAndExistingInfrastructure(context.Background(), em.exposures)
 

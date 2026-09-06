@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -72,12 +73,22 @@ func NewManagerWithProvider(provider interfaces.Provider) *Manager {
 
 // NewManagerWithProviderAndStore constructs a WorkloadManager with provider and persistent store.
 func NewManagerWithProviderAndStore(provider interfaces.Provider, store Store) *Manager {
-	expStore := networking.NewFileExposureStore("")
+	var expStore networking.ExposureStore
+	var svcStore services.ServiceStore
+	var connStore connections.ConnectionStore
 	incusProxyDriver := incus.NewIncusProxyDriver("/var/lib/incus/unix.socket")
+
+	if store != nil {
+		if fs, ok := store.(*FileStore); ok && fs != nil && fs.FilePath() != "" && fs.FilePath() != "in-memory" {
+			dir := filepath.Dir(fs.FilePath())
+			expStore = networking.NewFileExposureStore(filepath.Join(dir, "network_exposures.json"))
+			svcStore = services.NewFileServiceStore(filepath.Join(dir, "services.json"))
+			connStore = connections.NewFileConnectionStore(filepath.Join(dir, "connection_profiles.json"))
+		}
+	}
+
 	expMgr := networking.NewExposureManager(expStore, incusProxyDriver)
-	svcStore := services.NewFileServiceStore("")
 	svcMgr := services.NewServiceManager(svcStore, expMgr)
-	connStore := connections.NewFileConnectionStore("")
 	connMgr := connections.NewConnectionManager(connStore, svcMgr, expMgr)
 
 	m := &Manager{

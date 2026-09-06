@@ -1185,3 +1185,120 @@ func TestWorkloadProvisioningSSHPortAllocation(t *testing.T) {
 		t.Errorf("Expected SSH allocation to be released/not found after workload deletion")
 	}
 }
+
+func TestStoreIsolationAndDefaults(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Verify NewManagerWithProvider uses in-memory mode for all child stores
+	tp := NewTestProvider()
+	memMgr := NewManagerWithProvider(tp)
+
+	if memMgr.StorePath() != "in-memory" {
+		t.Errorf("Expected WorkloadManager store path to be 'in-memory', got '%s'", memMgr.StorePath())
+	}
+	if memMgr.ExposureManager().StorePath() != "in-memory" {
+		t.Errorf("Expected ExposureManager store path to be 'in-memory', got '%s'", memMgr.ExposureManager().StorePath())
+	}
+	if memMgr.ExposureManager().SSHPortAllocator().StorePath() != "in-memory" {
+		t.Errorf("Expected SSHPortAllocator store path to be 'in-memory', got '%s'", memMgr.ExposureManager().SSHPortAllocator().StorePath())
+	}
+	if memMgr.ServiceManager().StorePath() != "in-memory" {
+		t.Errorf("Expected ServiceManager store path to be 'in-memory', got '%s'", memMgr.ServiceManager().StorePath())
+	}
+	if memMgr.ConnectionManager().StorePath() != "in-memory" {
+		t.Errorf("Expected ConnectionManager store path to be 'in-memory', got '%s'", memMgr.ConnectionManager().StorePath())
+	}
+
+	// Create and provision a workload in in-memory mode, verifying zero disk persistence errors
+	spec := WorkloadSpec{
+		Name:         "mem-vps-01",
+		Provider:     "incus",
+		Type:         TypeIncusContainer,
+		Image:        "images:debian/13",
+		CPU:          1,
+		MemoryMB:     1024,
+		StorageGB:    10,
+		HostID:       "host-main",
+		PrivateIP:    "10.0.0.188",
+		ExposureMode: hosts.ExposurePrivateOnly,
+	}
+
+	w, err := memMgr.CreateWorkload(ctx, spec)
+	if err != nil {
+		t.Fatalf("CreateWorkload failed in in-memory mode: %v", err)
+	}
+	if _, err := memMgr.GeneratePlan(ctx, w.ID); err != nil {
+		t.Fatalf("GeneratePlan failed: %v", err)
+	}
+	if err := memMgr.ApprovePlan(ctx, w.ID); err != nil {
+		t.Fatalf("ApprovePlan failed: %v", err)
+	}
+	provW, err := memMgr.ProvisionWorkload(ctx, w.ID)
+	if err != nil {
+		t.Fatalf("ProvisionWorkload in in-memory mode failed (store leaked to disk?): %v", err)
+	}
+	if provW.SSHAccessInfo == nil || provW.SSHAccessInfo.Port != 22100 {
+		t.Errorf("Expected allocated SSH port 22100 in memory, got %+v", provW.SSHAccessInfo)
+	}
+
+	// 2. Verify NewManagerWithProviderAndStore with temp directory isolates all child stores to temp directory
+	tp2 := NewTestProvider()
+	tempDir := t.TempDir()
+	wlStorePath := filepath.Join(tempDir, "workloads.json")
+	fileMgr := NewManagerWithProviderAndStore(tp2, NewFileStore(wlStorePath))
+
+	if fileMgr.StorePath() != wlStorePath {
+		t.Errorf("Expected WorkloadManager store path '%s', got '%s'", wlStorePath, fileMgr.StorePath())
+	}
+	expPath := filepath.Join(tempDir, "network_exposures.json")
+	if fileMgr.ExposureManager().StorePath() != expPath {
+		t.Errorf("Expected ExposureManager store path '%s', got '%s'", expPath, fileMgr.ExposureManager().StorePath())
+	}
+	sshPath := filepath.Join(tempDir, "ssh_allocations.json")
+	if fileMgr.ExposureManager().SSHPortAllocator().StorePath() != sshPath {
+		t.Errorf("Expected SSHPortAllocator store path '%s', got '%s'", sshPath, fileMgr.ExposureManager().SSHPortAllocator().StorePath())
+	}
+	svcPath := filepath.Join(tempDir, "services.json")
+	if fileMgr.ServiceManager().StorePath() != svcPath {
+		t.Errorf("Expected ServiceManager store path '%s', got '%s'", svcPath, fileMgr.ServiceManager().StorePath())
+	}
+	connPath := filepath.Join(tempDir, "connection_profiles.json")
+	if fileMgr.ConnectionManager().StorePath() != connPath {
+		t.Errorf("Expected ConnectionManager store path '%s', got '%s'", connPath, fileMgr.ConnectionManager().StorePath())
+	}
+
+	spec2 := spec
+	spec2.Name = "file-vps-01"
+	spec2.PrivateIP = "10.0.0.189"
+
+	// Provision workload in file-backed temp directory, ensuring persistence files are created in tempDir
+	w2, err := fileMgr.CreateWorkload(ctx, spec2)
+	if err != nil {
+		t.Fatalf("CreateWorkload failed: %v", err)
+	}
+	if _, err := fileMgr.GeneratePlan(ctx, w2.ID); err != nil {
+		t.Fatalf("GeneratePlan failed: %v", err)
+	}
+	if err := fileMgr.ApprovePlan(ctx, w2.ID); err != nil {
+		t.Fatalf("ApprovePlan failed: %v", err)
+	}
+	if _, err := fileMgr.ProvisionWorkload(ctx, w2.ID); err != nil {
+		t.Fatalf("ProvisionWorkload with temp store failed: %v", err)
+	}
+
+	if _, err := os.Stat(sshPath); os.IsNotExist(err) {
+		t.Errorf("Expected SSH allocation file '%s' to exist after provisioning", sshPath)
+	}
+
+	// 3. Verify production NewManager retains /var/lib/mystic defaults
+	prodMgr := NewManager()
+	if filepath.Clean(prodMgr.StorePath()) != filepath.Clean("/var/lib/mystic/workloads.json") {
+		t.Errorf("Expected production workload store path '/var/lib/mystic/workloads.json', got '%s'", prodMgr.StorePath())
+	}
+	if filepath.Clean(prodMgr.ExposureManager().StorePath()) != filepath.Clean("/var/lib/mystic/network_exposures.json") {
+		t.Errorf("Expected production exposure store path '/var/lib/mystic/network_exposures.json', got '%s'", prodMgr.ExposureManager().StorePath())
+	}
+	if filepath.Clean(prodMgr.ExposureManager().SSHPortAllocator().StorePath()) != filepath.Clean("/var/lib/mystic/ssh_allocations.json") {
+		t.Errorf("Expected production SSH store path '/var/lib/mystic/ssh_allocations.json', got '%s'", prodMgr.ExposureManager().SSHPortAllocator().StorePath())
+	}
+}
