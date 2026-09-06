@@ -76,7 +76,7 @@ while [ "$#" -gt 0 ]; do
             MODE="uninstall"
             ;;
         --version|-v)
-            echo "Mystic Hypervisor Safe Installer v0.2.0-milestone2"
+            echo "Mystic Hypervisor Safe Installer v0.5.0-milestone3e"
             exit 0
             ;;
         --help|-h)

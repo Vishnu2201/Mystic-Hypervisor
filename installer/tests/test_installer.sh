@@ -31,6 +31,11 @@ echo ""
 
 UNAME_S="$(uname -s 2>/dev/null || echo "UNKNOWN")"
 
+TEST_TMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'mystic_test')
+trap 'rm -rf "$TEST_TMP_DIR"' EXIT
+
+export MYSTIC_STATE_DIR="$TEST_TMP_DIR/state"
+
 # WINDOWS LOCAL TESTS
 echo "--- WINDOWS LOCAL TESTS ---"
 echo "Executing local platform tests on dev host ($UNAME_S)..."
@@ -50,8 +55,12 @@ assert_contains "$OUT_VER" "Mystic Hypervisor Safe Installer" "Version flag repo
 # Test 4: Dry-Run Mode Output Layout & Unambiguous IP Fields
 OUT_DRY=$(bash "$INSTALLER_DIR/install.sh" --dry-run 2>&1 || true)
 assert_contains "$OUT_DRY" "NO CHANGES WILL BE MADE" "Dry-run mode outputs read-only plan"
-assert_contains "$OUT_DRY" "Windows Development Host" "Dry-run correctly detects Windows development host"
-assert_contains "$OUT_DRY" "UNSUPPORTED_DEV_HOST" "Dry-run rates Windows dev host as UNSUPPORTED_DEV_HOST"
+if case "$UNAME_S" in Linux*) false;; *) true;; esac; then
+    assert_contains "$OUT_DRY" "Windows Development Host" "Dry-run correctly detects Windows development host"
+    assert_contains "$OUT_DRY" "UNSUPPORTED_DEV_HOST" "Dry-run rates Windows dev host as UNSUPPORTED_DEV_HOST"
+else
+    assert_contains "$OUT_DRY" "Host Overview" "Dry-run renders Host Overview section on Linux"
+fi
 assert_contains "$OUT_DRY" "Host Public IP:" "Dry-run renders Host Public IP field"
 assert_contains "$OUT_DRY" "Upstream IP:" "Dry-run renders Upstream IP field"
 assert_contains "$OUT_DRY" "IP Assignment:" "Dry-run renders IP Assignment field"
@@ -78,18 +87,17 @@ assert_contains "$OUT_JSON" '"configured_exposure_mode":' "JSON plan includes co
 assert_contains "$OUT_JSON" '"gateway_id":' "JSON plan includes gateway_id field"
 assert_contains "$OUT_JSON" '"forwarding_rules": []' "JSON plan includes forwarding_rules list"
 
-# Test 6: Apply Guard on Dev Host
+# Test 6: Apply Guard on Dev Host / Apply Staging on Linux
 OUT_APPLY=$(bash "$INSTALLER_DIR/install.sh" --apply --yes 2>&1 || true)
-assert_contains "$OUT_APPLY" "Cannot execute --apply on a non-Linux development host" "Apply guard blocks host modifications on dev host"
+if case "$UNAME_S" in Linux*) false;; *) true;; esac; then
+    assert_contains "$OUT_APPLY" "Cannot execute --apply on a non-Linux development host" "Apply guard blocks host modifications on dev host"
+else
+    assert_contains "$OUT_APPLY" "Beginning installation transaction" "Apply mode initializes installation transaction on Linux"
+fi
 
 # TRANSACTION & BACKUP ENGINE TESTS (Milestone 4A)
 echo ""
 echo "--- TRANSACTION & BACKUP ENGINE TESTS ---"
-
-TEST_TMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'mystic_test')
-trap 'rm -rf "$TEST_TMP_DIR"' EXIT
-
-export MYSTIC_STATE_DIR="$TEST_TMP_DIR/state"
 
 source "$INSTALLER_DIR/modules/transaction.sh"
 source "$INSTALLER_DIR/modules/backup.sh"

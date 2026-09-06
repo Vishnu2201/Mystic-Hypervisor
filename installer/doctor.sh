@@ -24,9 +24,9 @@ if [ "${IS_LINUX:-0}" -eq 0 ]; then
 fi
 
 echo "  OS:           [OK] $DETECTED_OS"
-echo "  KVM:          [$HAS_KVM] Hardware virtualization support"
-echo "  Incus:        [$INCUS_PRESENT] Incus virtualization engine"
-echo "  LXC:          [$LXC_PRESENT] LXC container engine"
+echo "  KVM:          [$KVM_DEVICE_STATUS] Hardware virtualization support"
+echo "  Incus:        [$INCUS_STATUS] Incus virtualization engine"
+echo "  LXC:          [$LXC_STATUS] LXC container engine"
 echo "  Firewall:     [OK] $DETECTED_FIREWALL"
 echo "  SSH Service:  [$SSH_STATUS] Port $SSH_PORT"
 echo ""

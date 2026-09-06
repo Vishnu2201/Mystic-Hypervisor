@@ -162,8 +162,18 @@ init_transaction() {
             TX_BACKUP_DIR=""
             return 0
         fi
-        echo "Error: Failed to create transaction directory '$TX_DIR'. Aborting transaction." >&2
-        return 1
+        # Fallback for unprivileged testing when default /var/lib/mystic is not writable
+        if [ -z "${MYSTIC_STATE_DIR:-}" ] && [ "${EUID:-$(id -u 2>/dev/null || echo 1000)}" -ne 0 ]; then
+            base_state_dir="/tmp/mystic/state"
+            TX_LOG_DIR="${base_state_dir}/transactions"
+            TX_DIR="${TX_LOG_DIR}/${TX_ID}"
+            TX_BACKUP_DIR="${TX_DIR}/backup"
+            mkdir -p "$TX_DIR" "$TX_BACKUP_DIR" 2>/dev/null || true
+        fi
+        if [ -z "$TX_DIR" ] || [ ! -d "$TX_DIR" ]; then
+            echo "Error: Failed to create transaction directory '${TX_DIR:-/var/lib/mystic}'. Aborting transaction." >&2
+            return 1
+        fi
     fi
     
     # Restrict permissions
