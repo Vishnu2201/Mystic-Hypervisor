@@ -101,6 +101,13 @@ done
 detect_system
 evaluate_compatibility
 detect_package_manager
+
+if [ "$MODE" = "apply" ] && [ "${IS_LINUX:-0}" -eq 0 ]; then
+    echo "[ERROR] Cannot execute --apply on a non-Linux development host (${UNAME_S:-UNKNOWN})." >&2
+    echo "[ERROR] Mystic Hypervisor --apply requires a supported target Linux server." >&2
+    exit 1
+fi
+
 init_transaction "${MODE:-dry-run}"
 prepare_backup_plan
 verify_network_safety

@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# Plan Generation & Coexistence Output Renderer Module for Mystic Hypervisor (Milestone 3D)
+# Plan Generation & Coexistence Output Renderer Module for Mystic Hypervisor
+#
+# ARCHITECTURAL LIFECYCLE BOUNDARIES:
+# - detection: System discovery, OS identification & capability inspection
+# - planning: Installation spec creation, network exposure validation & dry-run planning (THIS MODULE)
+# - transaction state: Persistent transaction logging, audit history & state machine
+# - backup: Pre-change file backups, verification & restoration
+# - future mutation: (Milestone 4B/4C) Host system package installation, binary placement & systemd service setup
 
 render_dry_run_plan() {
     echo "========================================================"

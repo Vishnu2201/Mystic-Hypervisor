@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# Advanced Deep Inspection & Coexistence Detection Module for Mystic Hypervisor (Milestone 3D)
+# Advanced Deep Inspection & Coexistence Detection Module for Mystic Hypervisor
+#
+# ARCHITECTURAL LIFECYCLE BOUNDARIES:
+# - detection: System discovery, OS identification & capability inspection (THIS MODULE)
+# - planning: Installation spec creation, network exposure validation & dry-run planning
+# - transaction state: Persistent transaction logging, audit history & state machine
+# - backup: Pre-change file backups, verification & restoration
+# - future mutation: (Milestone 4B/4C) Host system package installation, binary placement & systemd service setup
+#
 # Performs 100% read-only inspection of Host, KVM, Incus, Docker, Pterodactyl, Network, Storage, Ownership, and NAT/Public IP topology.
 
 is_private_ipv4() {
